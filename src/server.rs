@@ -40,13 +40,24 @@ use axum::{
 
 pub async fn start_server(config: AppConfig, metrics_handle: PrometheusHandle, registry: Arc<crate::provider::ProviderRegistry>) -> Result<(), Box<dyn std::error::Error>> {
     let addr = format!("{}:{}", config.host, config.port);
+    let port = config.port;
     
+    // Bind the listener first to catch port-in-use errors early
+    let listener = match TcpListener::bind(&addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("ERROR: Failed to bind to address {}: {}", addr, e);
+            eprintln!("       This usually means the port {} is already in use by another process.", port);
+            eprintln!("       Try using a different port with --port <PORT>.");
+            std::process::exit(1);
+        }
+    };
+
     let app = create_app(config, Some(metrics_handle), registry).await;
 
-    // Use tracing instead of println
+    println!("🚀 VidaiMock is running at http://{}", addr);
     tracing::info!("Listening on {}", addr);
     
-    let listener = TcpListener::bind(addr).await?;
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;

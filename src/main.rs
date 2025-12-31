@@ -72,8 +72,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if config.log_level != "off" {
-        tracing::info!("VidaiMock Starting (Port: {}, Workers: {}, Latency: {}ms, Mode: {})", 
-            config.port, workers, config.latency.base_ms, config.latency.mode);
+        tracing::info!("VidaiMock Initialization (Workers: {}, Latency: {}ms, Mode: {})", 
+            workers, config.latency.base_ms, config.latency.mode);
 
         // Diagnostic: List embedded assets
         for file in crate::provider::Asset::iter() {
