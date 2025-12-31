@@ -19,19 +19,24 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact_name: vidaimock-linux-x64
+            archive_ext: tar.gz
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             artifact_name: vidaimock-linux-arm64
+            archive_ext: tar.gz
             use_cross: true
           - os: macos-latest
             target: x86_64-apple-darwin
             artifact_name: vidaimock-macos-x64
+            archive_ext: tar.gz
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact_name: vidaimock-macos-arm64
+            archive_ext: tar.gz
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact_name: vidaimock-windows-x64.exe
+            artifact_name: vidaimock-windows-x64
+            archive_ext: zip
 
     steps:
       - uses: actions/checkout@v4
@@ -46,16 +51,35 @@ jobs:
         run: |
           cargo install cross
           cross build --release --target ${{ matrix.target }}
-          cp target/${{ matrix.target }}/release/vidaimock ${{ matrix.artifact_name }}
+          PKG_DIR="vidaimock"
+          mkdir -p $PKG_DIR
+          cp target/${{ matrix.target }}/release/vidaimock $PKG_DIR/
+          cp -r config README.md LICENSE CHANGELOG.md $PKG_DIR/
+          tar -czf ${{ matrix.artifact_name }}.${{ matrix.archive_ext }} $PKG_DIR/
 
       - name: Build with Cargo (non-cross)
         if: "!matrix.use_cross"
         run: |
           cargo build --release --target ${{ matrix.target }}
+          PKG_DIR="vidaimock"
+          mkdir -p $PKG_DIR
           if [ "${{ runner.os }}" = "Windows" ]; then
-            cp target/${{ matrix.target }}/release/vidaimock.exe ${{ matrix.artifact_name }}
+            cp target/${{ matrix.target }}/release/vidaimock.exe $PKG_DIR/
+            cp -r config README.md LICENSE CHANGELOG.md $PKG_DIR/
+            7z a ${{ matrix.artifact_name }}.${{ matrix.archive_ext }} $PKG_DIR/
           else
-            cp target/${{ matrix.target }}/release/vidaimock ${{ matrix.artifact_name }}
+            cp target/${{ matrix.target }}/release/vidaimock $PKG_DIR/
+            cp -r config README.md LICENSE CHANGELOG.md $PKG_DIR/
+            tar -czf ${{ matrix.artifact_name }}.${{ matrix.archive_ext }} $PKG_DIR/
+          fi
+        shell: bash
+
+      - name: Generate Checksum
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            certutil -hashfile ${{ matrix.artifact_name }}.${{ matrix.archive_ext }} SHA256 | grep -v "hash" | head -n 1 > ${{ matrix.artifact_name }}.sha256
+          else
+            shasum -a 256 ${{ matrix.artifact_name }}.${{ matrix.archive_ext }} > ${{ matrix.artifact_name }}.sha256
           fi
         shell: bash
 
@@ -63,7 +87,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
-          path: ${{ matrix.artifact_name }}
+          path: |
+            ${{ matrix.artifact_name }}.${{ matrix.archive_ext }}
+            ${{ matrix.artifact_name }}.sha256
 
   release:
     name: Create Release
