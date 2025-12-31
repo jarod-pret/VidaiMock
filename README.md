@@ -8,11 +8,14 @@
 ## ⚡ 30-Second Demo
 
 ```bash
-# Download and run (macOS Apple Silicon)
-curl -LO https://github.com/vidaiUK/VidaiMock/releases/latest/download/vidaimock-macos-arm64
-chmod +x vidaimock-macos-arm64 && ./vidaimock-macos-arm64
+# Download and bundle (macOS Apple Silicon)
+curl -LO https://github.com/vidaiUK/VidaiMock/releases/latest/download/vidaimock-macos-arm64.tar.gz
+tar -xzf vidaimock-macos-arm64.tar.gz && cd vidaimock
 
-# Test it — streaming works out of the box!
+# Run and enjoy!
+./vidaimock
+
+# (In another terminal) Test it!
 curl -N http://localhost:8100/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model": "gpt-4", "stream": true, "messages": [{"role": "user", "content": "Hello!"}]}'
@@ -43,21 +46,39 @@ Plus: Tool calling, RAG citations, embeddings, and more.
 - **🎛️ Chaos Testing**: Inject failures, latency, malformed responses
 - **📝 Customizable**: YAML configs + Tera templates for any API
 
+## 📂 Project Structure
+
+- `bin/`: The VidaiMock executable
+- `config/`: Default provider YAMLs and J2 templates
+- `examples/`: 20+ advanced templates (RAG, Tool calling, Fuzzing, etc.)
+- `scripts/`: Diagnostic and verification helpers
+
 ## 📦 Installation
 
-**Pre-built binaries** (recommended):
+**Download Bundled Release** (Recommended):
+Releases come bundled with the binary, default providers, templates, and usage examples.
+
 ```bash
 # macOS Apple Silicon
-curl -LO https://github.com/vidaiUK/VidaiMock/releases/latest/download/vidaimock-macos-arm64
+curl -LO https://github.com/vidaiUK/VidaiMock/releases/latest/download/vidaimock-macos-arm64.tar.gz
+tar -xzf vidaimock-macos-arm64.tar.gz && cd vidaimock
 
 # macOS Intel
-curl -LO https://github.com/vidaiUK/VidaiMock/releases/latest/download/vidaimock-macos-x64
+curl -LO https://github.com/vidaiUK/VidaiMock/releases/latest/download/vidaimock-macos-x64.tar.gz
+tar -xzf vidaimock-macos-x64.tar.gz && cd vidaimock
 
 # Linux x64
-curl -LO https://github.com/vidaiUK/VidaiMock/releases/latest/download/vidaimock-linux-x64
+curl -LO https://github.com/vidaiUK/VidaiMock/releases/latest/download/vidaimock-linux-x64.tar.gz
+tar -xzf vidaimock-linux-x64.tar.gz && cd vidaimock
 
-chmod +x vidaimock-* && ./vidaimock-*
+./vidaimock
 ```
+
+### 🔐 Security Notice (macOS/Windows)
+Since VidaiMock is an open-source project without a paid developer certificate, your OS may show a security warning:
+
+*   **macOS**: Run `xattr -d com.apple.quarantine vidaimock` in your terminal to allow the binary to run.
+*   **Windows**: Click "More info" in the SmartScreen popup and select "Run anyway".
 
 **Build from source**:
 ```bash
@@ -110,4 +131,4 @@ Apache 2.0 — See [LICENSE](LICENSE).
 
 ---
 
-Built with ❤️ by [Vidai](https://vidai.uk)
+Built with ❤️ by [Vidai](https://vidai.uk) from Scotland
