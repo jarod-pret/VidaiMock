@@ -67,15 +67,24 @@ tar -xzf vidaimock-macos-arm64.tar.gz && cd vidaimock
 curl -LO https://github.com/vidaiUK/VidaiMock/releases/latest/download/vidaimock-macos-x64.tar.gz
 tar -xzf vidaimock-macos-x64.tar.gz && cd vidaimock
 
+# Linux ARM64
+curl -LO https://github.com/vidaiUK/VidaiMock/releases/latest/download/vidaimock-linux-arm64.tar.gz
+tar -xzf vidaimock-linux-arm64.tar.gz && cd vidaimock
+
 # Linux x64
 curl -LO https://github.com/vidaiUK/VidaiMock/releases/latest/download/vidaimock-linux-x64.tar.gz
 tar -xzf vidaimock-linux-x64.tar.gz && cd vidaimock
+
+# Windows x64 (PowerShell)
+Invoke-WebRequest -Uri https://github.com/vidaiUK/VidaiMock/releases/latest/download/vidaimock-windows-x64.zip -OutFile vidaimock-windows-x64.zip
+Expand-Archive vidaimock-windows-x64.zip -DestinationPath .
+cd vidaimock
 
 ./vidaimock
 ```
 
 ### 🔐 Security Notice (macOS/Windows)
-Since VidaiMock is an open-source project without a paid developer certificate, your OS may show a security warning:
+Since VidaiMock is an open-source project, your OS may show a security warning:
 
 *   **macOS**: Run `xattr -d com.apple.quarantine vidaimock` in your terminal to allow the binary to run.
 *   **Windows**: Click "More info" in the SmartScreen popup and select "Run anyway".
