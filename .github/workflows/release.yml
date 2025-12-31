@@ -54,7 +54,7 @@ jobs:
           PKG_DIR="vidaimock"
           mkdir -p $PKG_DIR
           cp target/${{ matrix.target }}/release/vidaimock $PKG_DIR/
-          cp -r config README.md LICENSE CHANGELOG.md $PKG_DIR/
+          cp -r config examples README.md LICENSE CHANGELOG.md $PKG_DIR/
           tar -czf ${{ matrix.artifact_name }}.${{ matrix.archive_ext }} $PKG_DIR/
 
       - name: Build with Cargo (non-cross)
@@ -65,11 +65,11 @@ jobs:
           mkdir -p $PKG_DIR
           if [ "${{ runner.os }}" = "Windows" ]; then
             cp target/${{ matrix.target }}/release/vidaimock.exe $PKG_DIR/
-            cp -r config README.md LICENSE CHANGELOG.md $PKG_DIR/
+            cp -r config examples README.md LICENSE CHANGELOG.md $PKG_DIR/
             7z a ${{ matrix.artifact_name }}.${{ matrix.archive_ext }} $PKG_DIR/
           else
             cp target/${{ matrix.target }}/release/vidaimock $PKG_DIR/
-            cp -r config README.md LICENSE CHANGELOG.md $PKG_DIR/
+            cp -r config examples README.md LICENSE CHANGELOG.md $PKG_DIR/
             tar -czf ${{ matrix.artifact_name }}.${{ matrix.archive_ext }} $PKG_DIR/
           fi
         shell: bash
