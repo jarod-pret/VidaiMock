@@ -1,0 +1,13 @@
+name: azure-openai
+# Matches /openai/deployments/{deployment-id}/chat/completions or /embeddings
+matcher: "/openai/deployments/.*/(chat/completions|embeddings)"
+request_mapping:
+  model: "azure-mock-model"
+stream:
+  enabled: true
+  lifecycle:
+    on_chunk:
+      template_path: "openai/stream_chunk.json.j2"
+    on_stop:
+      template_body: "[DONE]"
+response_template: "openai/chat_completion.json.j2"

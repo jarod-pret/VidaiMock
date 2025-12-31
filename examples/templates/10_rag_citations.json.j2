@@ -1,0 +1,15 @@
+{
+  "id": "rag-{{ uuid() }}",
+  "choices": [
+    {
+      "message": {
+        "role": "assistant",
+        "content": "According to the document [1], the revenue was $10M. Source [2] confirms this.\\n\\nCitations:\\n[1] Annual Report 2024\\n[2] Q3 Earnings Call"
+      }
+    }
+  ],
+  "context": {
+    "citations_retrieved": {{ random_int(min=1, max=5) }},
+    "latency_ms": {{ random_int(min=100, max=500) }}
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "meta": {
+    "api_version": "v2",
+    "request_id": "{{ uuid() }}",
+    "trace": {
+      "span_id": "{{ random_int(min=10000, max=99999) }}",
+      "parent_id": "{{ random_int(min=10000, max=99999) }}"
+    }
+  },
+  "data": {
+    "user": {
+      "id": "usr_123",
+      "preferences": {
+        "theme": "dark",
+        "notifications": {
+          "email": true,
+          "push": false
+        }
+      }
+    },
+    "history": [
+      {% for i in range(end=3) %}
+      {
+        "event": "login",
+        "ts": {{ timestamp() - (i * 3600) }},
+        "metadata": {
+           "ip": "192.168.1.{{ random_int(min=1, max=255) }}"
+        }
+      }{% if not loop.last %},{% endif %}
+      {% endfor %}
+    ]
+  }
+}

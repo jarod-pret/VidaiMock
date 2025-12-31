@@ -1,0 +1,13 @@
+name: "bedrock"
+matcher: "^/model/.*/invoke(-with-response-stream)?$"
+request_mapping:
+  prompt: "{{ json.messages.0.content.0.text }}"
+response_template: "bedrock/invoke.json.j2"
+stream:
+  enabled: true
+  encoding: "aws-event-stream"
+  format: '{{ chunk }}'
+  lifecycle:
+    on_chunk:
+       template_body: '{"chunk":{"bytes":"{{ chunk | b64encode }}"}}'
+

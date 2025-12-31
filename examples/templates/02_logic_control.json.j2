@@ -1,0 +1,12 @@
+{
+  "id": "chatcmpl-{{ uuid() }}",
+  "created": {{ timestamp() }},
+  "choices": [
+    {
+      "message": {
+        "role": "assistant",
+        "content": "{% if json.messages | last | get('content') | lower is containing('error') %}I am simulating an error scenario for you.{% else %}Everything looks normal.{% endif %}"
+      }
+    }
+  ]
+}

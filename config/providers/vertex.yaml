@@ -1,0 +1,17 @@
+name: vertex
+# Vertex AI endpoint pattern:
+# /v1/projects/{project}/locations/{location}/publishers/google/models/{model}:generateContent
+# Matcher captures both project, location, and model
+matcher: "^/v1/projects/[^/]+/locations/[^/]+/publishers/google/models/[^:]+:(generate|streamGenerate)Content$"
+request_mapping:
+  model: "gemini-pro"
+stream:
+  enabled: true
+  lifecycle:
+    on_chunk:
+      template_path: "vertex/response.json.j2"
+    on_stop:
+      template_body: "[DONE]"
+  # Wrap responses in SSE data: prefix
+  format: "{{ chunk }}"
+response_template: "vertex/response.json.j2"

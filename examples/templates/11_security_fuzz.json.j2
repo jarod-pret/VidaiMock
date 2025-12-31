@@ -1,0 +1,11 @@
+{
+  "id": "fuzz-{{ uuid() }}",
+  "choices": [
+    {
+      "message": {
+        "role": "assistant",
+        "content": "{% for i in range(end=100) %}FUZZ_TEST_DATA_{{ random_int(min=0, max=999999) }} {% endfor %}"
+      }
+    }
+  ]
+}

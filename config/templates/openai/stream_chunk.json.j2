@@ -1,0 +1,2 @@
+{"id":"chatcmpl-{{ uuid() }}","object":"chat.completion.chunk","created":{{ timestamp() }},"model":"{{ json.model }}","choices":[{"index":0,"delta":{"content":"{{ chunk }}"},"finish_reason":null}]}
+

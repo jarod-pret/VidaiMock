@@ -1,0 +1,8 @@
+{
+  "request_info": {
+    "user_agent": "{{ headers['user-agent'] | default(value='unknown') }}",
+    "debug_mode": {{ query.debug | default(value='false') }},
+    "request_id": "{{ headers['x-request-id'] | default(value=uuid()) }}"
+  },
+  "content": "Reflected headers for debugging."
+}

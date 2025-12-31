@@ -1,0 +1,3 @@
+name: "example-rag"
+matcher: "/examples/rag"
+response_template: "examples/templates/10_rag_citations.json.j2"

@@ -1,0 +1,17 @@
+name: cohere
+matcher: "^/v1/chat$"
+request_mapping:
+  model: "command-r"
+stream:
+  enabled: true
+  lifecycle:
+    on_start:
+      event_name: "stream-start"
+      template_path: "config/templates/cohere/stream_start.json.j2"
+    on_chunk:
+      event_name: "text-generation"
+      template_path: "config/templates/cohere/stream_chunk.json.j2"
+    on_stop:
+      event_name: "stream-end"
+      template_path: "config/templates/cohere/stream_end.json.j2"
+response_template: "config/templates/cohere/response.json.j2"

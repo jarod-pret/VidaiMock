@@ -1,0 +1,14 @@
+name: openai-compatible
+# Matches standard /v1/chat/completions
+# This serves as a catch-all for any OpenAI-compatible client
+matcher: "/v1/chat/completions"
+request_mapping:
+  model: "{{ json.model | default(value='mock-model') }}"
+stream:
+  enabled: true
+  lifecycle:
+    on_chunk:
+      template_path: "config/templates/openai/stream_chunk.json.j2"
+    on_stop:
+      template_body: "[DONE]"
+response_template: "config/templates/openai/chat_completion.json.j2"

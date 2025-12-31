@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-{{ uuid }}",
+  "object": "chat.completion",
+  "created": {{ timestamp }},
+  "model": "{{ model }}",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        {% set last_msg = json.messages | default(value=[]) | last %}"content": "{{ last_msg.content | default(value='Hello!') }}"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 10,
+    "completion_tokens": 10,
+    "total_tokens": 20
+  }
+}

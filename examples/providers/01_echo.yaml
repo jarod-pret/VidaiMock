@@ -1,0 +1,5 @@
+name: "example-echo"
+matcher: "/examples/echo"
+request_mapping:
+  model: "mock-model-v1"
+response_template: "examples/templates/01_simple_echo.json.j2"

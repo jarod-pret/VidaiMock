@@ -1,0 +1,4 @@
+name: "blackbox-demo"
+matcher: "^/v1/demo/blackbox$"
+response_body: |
+  { "status": "success", "message": "Dynamic loading confirmed!" }

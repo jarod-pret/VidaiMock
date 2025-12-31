@@ -1,0 +1,3 @@
+name: "openai-embeddings"
+matcher: "^/v1/embeddings$"
+response_template: "openai/embeddings.json.j2"

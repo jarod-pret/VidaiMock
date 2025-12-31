@@ -1,0 +1,22 @@
+name: "bedrock-converse"
+matcher: "^/model/.*/(converse|converse-stream)$"
+request_mapping:
+  prompt: "{{ json.messages.0.content.0.text }}"
+response_template: "bedrock/converse.json.j2"
+stream:
+  enabled: true
+  encoding: "aws-event-stream"
+  lifecycle:
+    on_start:
+      event_name: "message_start"
+      template_body: |
+        {"type":"message_start","message":{"id":"msg_{{ uuid() }}"}}
+    on_chunk:
+      event_name: "content_block_delta" 
+      template_body: |
+        {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"{{ chunk }}"}}
+    on_stop:
+      event_name: "message_stop"
+      template_body: |
+        {"type":"message_stop"}
+

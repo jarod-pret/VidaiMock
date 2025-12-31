@@ -1,0 +1,18 @@
+name: gemini
+# Gemini AI Studio endpoint pattern:
+# /v1/models/{model}:generateContent
+# /v1beta/models/{model}:streamGenerateContent
+matcher: "^/v1(beta)?/models/[^:]+:((generate|streamGenerate|embed)Content|countTokens)$"
+request_mapping:
+  model: "gemini-pro"
+stream:
+  enabled: true
+  lifecycle:
+    on_chunk:
+      # Gemini sends a standard array of candidates per chunk
+      template_path: "gemini/response.json.j2"
+    on_stop:
+      template_body: "[DONE]"
+  # Wrap responses in SSE data: prefix
+  format: "{{ chunk }}"
+response_template: "gemini/response.json.j2"

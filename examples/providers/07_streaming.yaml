@@ -1,0 +1,12 @@
+name: "example-openai-stream"
+matcher: "/examples/openai/chat/completions"
+request_mapping:
+  model: "gpt-4-turbo"
+stream:
+  enabled: true
+  lifecycle:
+    on_chunk:
+      template_path: "examples/templates/07_openai_stream_chunk.json.j2"
+    on_stop:
+       # OpenAI sends [DONE] at the end
+      template_body: "data: [DONE]\n\n"

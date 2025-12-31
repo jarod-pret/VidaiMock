@@ -1,0 +1,42 @@
+# Build outputs
+/target
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Editor backups
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment files (NEVER commit these)
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# Test artifacts
+custom_response_test.json
+secret_leak.json
+temp_config.toml
+custom_resp.json
+presets/plaintext.json
+presets/my_custom_provider.json
+
+# Benchmarks
+*.hgrm
+*.svg
+
+# Distribution
+/vidaimock-dist/
+/server.log
+/docs
+/Server_Docs
+/dist

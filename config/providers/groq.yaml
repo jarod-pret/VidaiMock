@@ -1,0 +1,6 @@
+name: "groq"
+matcher: "^/groq/v1/chat/completions$"
+request_mapping:
+  prompt: "{% for m in json.messages %}{% if loop.last %}{{ m.content }}{% endif %}{% endfor %}"
+  model: "{{ json.model }}"
+response_template: "groq/chat.json.j2"

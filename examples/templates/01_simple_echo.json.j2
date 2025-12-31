@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-{{ uuid() }}",
+  "created": {{ timestamp() }},
+  "object": "chat.completion",
+  "model": "{{ json.model }}",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "You said: {{ json.messages | last | get('content') }}"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 10,
+    "completion_tokens": 8,
+    "total_tokens": 18
+  }
+}

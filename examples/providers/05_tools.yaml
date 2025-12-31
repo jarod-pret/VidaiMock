@@ -1,0 +1,6 @@
+name: "example-tools"
+matcher: "/examples/tools"
+request_mapping:
+  # Extract the last message content to decide logic (optional)
+  last_msg: "{{ json.messages | last | get('content') }}"
+response_template: "examples/templates/05_tool_calling.json.j2"

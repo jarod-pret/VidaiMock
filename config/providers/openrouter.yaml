@@ -1,0 +1,6 @@
+name: "openrouter"
+matcher: "^/api/v1/chat/completions$"
+request_mapping:
+  prompt: "{{ json.messages.0.content }}"
+  model: "{{ json.model }}"
+response_template: "openrouter/chat.json.j2"

@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-{{ uuid }}",
+  "object": "chat.completion",
+  "created": {{ timestamp }},
+  "model": "{{ model }}",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "This is a mock response from the generic engine! Model: {{ model }}"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 10,
+    "completion_tokens": 10,
+    "total_tokens": 20
+  }
+}

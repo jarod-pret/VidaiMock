@@ -1,0 +1,12 @@
+name: mistral
+matcher: "^/v1/mistral/chat/completions$"
+request_mapping:
+  model: "{{ json.model | default(value='mistral-medium') }}"
+stream:
+  enabled: true
+  lifecycle:
+    on_chunk:
+      template_path: "config/templates/openai/stream_chunk.json.j2"
+    on_stop:
+      template_body: "[DONE]"
+response_template: "config/templates/openai/chat_completion.json.j2"

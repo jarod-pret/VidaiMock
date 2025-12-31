@@ -1,0 +1,5 @@
+
+port = 3002
+[[endpoints]]
+path = "/v1/chat/completions"
+format = "dynamic_test"

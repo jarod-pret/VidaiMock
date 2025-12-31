@@ -1,0 +1,15 @@
+name: "anthropic"
+matcher: "^/v1/messages(/stream)?$"
+response_template: "anthropic/message.json.j2"
+stream:
+  enabled: true
+  lifecycle:
+    on_start:
+      event_name: "message_start"
+      template_path: "anthropic/stream/start.json.j2"
+    on_chunk:
+      event_name: "content_block_delta"
+      template_path: "anthropic/stream/delta.json.j2"
+    on_stop:
+      event_name: "message_stop"
+      template_path: "anthropic/stream/stop.json.j2"

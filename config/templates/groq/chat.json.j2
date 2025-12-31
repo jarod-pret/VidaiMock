@@ -1,0 +1,27 @@
+{
+    "id": "chatcmpl-{{ uuid() }}",
+    "object": "chat.completion",
+    "created": {{ timestamp() }},
+    "model": "{{ model }}",
+    "choices": [
+        {
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "Hello from Groq Mock! You said: {{ prompt }}"
+            },
+            "logprobs": null,
+            "finish_reason": "stop"
+        }
+    ],
+    "usage": {
+        "queue_time": 0.012,
+        "prompt_tokens": 10,
+        "prompt_time": 0.001,
+        "completion_tokens": 5,
+        "completion_time": 0.045,
+        "total_tokens": 15,
+        "total_time": 0.058
+    },
+    "system_fingerprint": "fp_mock_groq"
+}

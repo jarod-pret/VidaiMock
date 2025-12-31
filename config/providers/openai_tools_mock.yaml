@@ -1,0 +1,11 @@
+name: "openai-tools-mock"
+matcher: "^/v1/tools_mock$"
+response_template: "openai/tool_call.json.j2"
+stream:
+  enabled: true
+  format: '{{ chunk }}' 
+  lifecycle:
+    on_chunk:
+       template_body: '{"id":"chatcmpl-mock","object":"chat.completion.chunk","created":1699000000,"model":"{{ model }}","choices":[{"index":0,"delta":{% if chunk is string %}{"content":"{{ chunk }}"}{% else %}{"tool_calls":{{ chunk | json_encode() }}}{% endif %},"finish_reason":null}]}'
+    on_stop:
+       template_body: '[DONE]'

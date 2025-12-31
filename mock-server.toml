@@ -1,0 +1,17 @@
+port = 8100
+workers = 8
+log_level = "info"
+config_dir = "config" # Directory containing providers/ and templates/
+
+# Latency Simulation Configuration
+[latency]
+# Options: "benchmark" (no sleep), "realistic" (sleep +- jitter), "debug" (logging)
+mode = "benchmark"
+base_ms = 50
+jitter_pct = 0.2
+
+# Define custom endpoints (Optional - Providers in config/providers/ are loaded automatically)
+# Use this section only for quick manual overrides or simple echo endpoints.
+# [[endpoints]]
+# path = "/legacy/chat"
+# format = "openai"

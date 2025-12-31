@@ -1,0 +1,18 @@
+{
+  "id": "msg_{{ uuid() }}",
+  "type": "message",
+  "role": "assistant",
+  "content": [
+    {
+      "type": "text",
+      "text": "Hello form Anthropic Mock! You said: {{ json.messages | last | get('content') }}"
+    }
+  ],
+  "model": "{{ json.model }}",
+  "stop_reason": "end_turn",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 10,
+    "output_tokens": 20
+  }
+}
