@@ -131,4 +131,4 @@ Apache 2.0 — See [LICENSE](LICENSE).
 
 ---
 
-Built with ❤️ by [Vidai](https://vidai.uk) from Scotland
+Built with ❤️ by [Vidai](https://vidai.uk) from Scotland 🏴󠁧󠁢󠁳󠁣󠁴󠁿
