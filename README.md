@@ -42,7 +42,7 @@ Plus: Tool calling, RAG citations, embeddings, and more.
 
 ## ✨ Key Features
 
-- **🚀 Zero Config**: Single binary, instant startup, all providers included
+- **🚀 Zero Config / Zero Fixtures**: Single **~7MB binary**, instant startup, no Docker/DB, and zero setup required.
 - **🌊 Physics-Accurate Streaming**: Realistic TTFT and token-by-token delivery with **provider-native streaming payloads** (OpenAI SSE, Anthropic EventStream, Gemini, etc.)
 - **⚡ High Performance**: 50,000+ RPS in benchmark mode
 - **🎛️ Chaos Testing**: Inject failures, latency, malformed responses
