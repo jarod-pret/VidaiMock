@@ -54,7 +54,11 @@ VidaiMock is the official development environment for [Vidai.Server](https://vid
 
 The same logic that powers VidaiMock's simulation of network jitter, latency, and failure modes is used in production to provide sovereign control planes for enterprise LLM infrastructure.
 
-Unlike simple mockers that return static text, **VidaiMock emulates the exact wire-format and timing** of LLM streaming payloads, making it the perfect tool for testing streaming UI/UX and SDK resilience.
+### 🌊 More than a Mock
+Unlike tools that just record and replay static data or intercept browser requests, **VidaiMock is a standalone Simulation Engine**. It emulates the exact wire-format and per-token timing of LLM streaming payloads, making it the perfect tool for testing streaming UI/UX and SDK resilience.
+
+*   **Truly Dynamic**: Every response is a Tera template. You can reflect request data, generate random IDs, or use complex logic to make your mock feel alive.
+*   **Physics-Accurate**: Emulates real-world network protocols (SSE, EventStream) and silver-level latency.
 
 ## 📂 Project Structure
 
