@@ -162,4 +162,14 @@ VidaiMock runs locally, but we offer a managed control plane for enterprise team
 
 ---
 
+## 💜 Acknowledgments
+
+VidaiMock is built on the shoulders of giants in the Rust ecosystem:
+- [Axum](https://github.com/tokio-rs/axum) & [Tokio](https://github.com/tokio-rs/tokio) for the high-performance async foundation.
+- [Tera](https://github.com/Keats/tera) for the flexible templating engine.
+- [rust-embed](https://github.com/pyrossh/rust-embed) for the zero-config binary magic.
+- [Mimalloc](https://github.com/microsoft/mimalloc) for the lightning-fast memory allocation.
+
+---
+
 Built with ❤️ by [Vidai](https://vidai.uk) from Scotland 🏴󠁧󠁢󠁳󠁣󠁴󠁿
