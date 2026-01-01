@@ -3,6 +3,8 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
 
+[Home Page](https://Vidai.uk) | [Documentation](https://vidai.uk/docs/mock/intro/)
+
 **Batteries-included mock server for LLM APIs** — works instantly with OpenAI, Anthropic, Gemini, Bedrock, and more. Zero config required.
 
 ## ⚡ 30-Second Demo
@@ -41,10 +43,18 @@ Plus: Tool calling, RAG citations, embeddings, and more.
 ## ✨ Key Features
 
 - **🚀 Zero Config**: Single binary, instant startup, all providers included
-- **🌊 Streaming Physics**: Realistic TTFT and token-by-token delivery
+- **🌊 Physics-Accurate Streaming**: Realistic TTFT and token-by-token delivery with **provider-native streaming payloads** (OpenAI SSE, Anthropic EventStream, Gemini, etc.)
 - **⚡ High Performance**: 50,000+ RPS in benchmark mode
 - **🎛️ Chaos Testing**: Inject failures, latency, malformed responses
 - **📝 Customizable**: YAML configs + Tera templates for any API
+
+## 🛡️ Built for Vidai.Server
+
+VidaiMock is the official development environment for [Vidai.Server](https://vidai.uk)—the **High-Density Enterprise AI Gateway**. 
+
+The same logic that powers VidaiMock's simulation of network jitter, latency, and failure modes is used in production to provide sovereign control planes for enterprise LLM infrastructure.
+
+Unlike simple mockers that return static text, **VidaiMock emulates the exact wire-format and timing** of LLM streaming payloads, making it the perfect tool for testing streaming UI/UX and SDK resilience.
 
 ## 📂 Project Structure
 
@@ -116,9 +126,9 @@ curl -H "X-Vidai-Chaos-Drop: 100" http://localhost:8100/v1/chat/completions ...
 
 ## 📚 Documentation
 
-The documentation for VidaiMock has moved to a separate documentation site (coming soon). 
+The documentation for VidaiMock is available at our [Documentation Site](https://vidai.uk/docs/mock/intro/). 
 
-Please check the [GitHub Wiki](https://github.com/vidaiUK/VidaiMock/wiki) or our website for the latest guides.
+For more information about Vidai, visit our [Home Page](https://Vidai.uk).
 
 ## 🛠️ CLI Reference
 
@@ -137,6 +147,14 @@ Options:
 ## 📄 License
 
 Apache 2.0 — See [LICENSE](LICENSE).
+
+---
+
+### 🌐 Looking for Centralized Test Infrastructure?
+
+VidaiMock runs locally, but we offer a managed control plane for enterprise teams. 
+
+**[Get Started with Vidai Managed](https://vidai.uk)**
 
 ---
 
