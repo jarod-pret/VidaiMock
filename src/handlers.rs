@@ -310,17 +310,19 @@ pub async fn streaming_handler(
             // Support Tool Calls: extract_content returns Value
             let (content_val, has_tool_calls) = extract_content_value(&full_response);
             
-            let chunks: Vec<serde_json::Value> = if has_tool_calls || stream_config.format.is_some() {
-                // If we have tool calls or custom format, send as one chunk for now (or improve splitting later)
-                vec![content_val]
-            } else {
-                // Split text content by whitespace
-                if let Some(s) = content_val.as_str() {
-                     s.split_whitespace().map(|w| serde_json::Value::String(format!("{} ", w))).collect()
+            let chunks: Vec<serde_json::Value> =
+                if has_tool_calls {
+                    // If tool calls exist, send as a single chunk.
+                    vec![content_val]
+                } else if let Some(s) = content_val.as_str() {
+                    // Otherwise, split the string content into chunks by whitespace (per-word chunked streaming).
+                    s.split_whitespace()
+                        .map(|w| serde_json::Value::String(format!("{} ", w)))
+                        .collect()
                 } else {
-                     vec![content_val]
-                }
-            };
+                    // Fallback: single chunk if not string or not split-able.
+                    vec![content_val]
+                };
             
             let lifecycle = stream_config.lifecycle.clone();
             let stream_fmt = stream_config.format.clone();
@@ -355,8 +357,8 @@ pub async fn streaming_handler(
                          return None;
                      }
                 }
-
-                if idx > chunks.len() { return None; }
+                // + 1 is necessary here in order to return DONE
+                if idx > chunks.len() + 1 { return None; } 
                                 
                 let raw_data: Option<String> = if idx == 0 {
                     // Start Event
