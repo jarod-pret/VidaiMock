@@ -52,11 +52,14 @@ pub async fn start_server(config: AppConfig, metrics_handle: PrometheusHandle, r
             std::process::exit(1);
         }
     };
+    
+    // Useful when passing port 0 (which means "pick an available port").
+    let local_addr = listener.local_addr().unwrap();
 
     let app = create_app(config, Some(metrics_handle), registry).await;
 
-    println!("🚀 VidaiMock is running at http://{}", addr);
-    tracing::info!("Listening on {}", addr);
+    println!("🚀 VidaiMock is running at http://{}", local_addr);
+    tracing::info!("Listening on {}", local_addr);
     
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
