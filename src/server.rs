@@ -56,6 +56,10 @@ pub async fn start_server(config: AppConfig, metrics_handle: PrometheusHandle, r
     // Useful when passing port 0 (which means "pick an available port").
     let local_addr = listener.local_addr().unwrap();
 
+    // Update the config with the actual bound port so the /status endpoint reports it correctly
+    let mut config = config;
+    config.port = local_addr.port();
+
     let app = create_app(config, Some(metrics_handle), registry).await;
 
     println!("🚀 VidaiMock is running at http://{}", local_addr);
@@ -232,6 +236,7 @@ mod tests {
             response_template: None,
             response_body: Some(r#"{"id": "test-id", "object": "chat.completion", "model": "test-model"}"#.to_string()),
             stream: None,
+            priority: 0,
         };
         registry.add_provider(config).unwrap();
         Arc::new(registry)
@@ -326,6 +331,7 @@ mod tests {
             response_template: None,
             response_body: Some(r#"{"object": "chat.completion"}"#.to_string()),
             stream: None,
+            priority: 0,
         }).unwrap();
 
         // Anthropic
@@ -336,6 +342,7 @@ mod tests {
             response_template: None,
             response_body: Some(r#"{"type": "message"}"#.to_string()),
             stream: None,
+            priority: 0,
         }).unwrap();
 
         // Gemini
@@ -346,6 +353,7 @@ mod tests {
             response_template: None,
             response_body: Some(r#"{"candidates": []}"#.to_string()),
             stream: None,
+            priority: 0,
         }).unwrap();
 
         let app = create_app(config, None, Arc::new(registry)).await;

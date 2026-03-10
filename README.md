@@ -178,6 +178,7 @@ A special thanks to everyone who helps make VidaiMock better!
 
 | Contributor | Highlights |
 | :--- | :--- |
+| [<img src="https://github.com/NiltonVolpato.png?size=64" width="64" alt="NiltonVolpato"/><br/>**NiltonVolpato**](https://github.com/NiltonVolpato) | 🛠️ Improvements to listener address reporting and OS-assigned port support. |
 | [<img src="https://github.com/bbRLdev.png?size=64" width="64" alt="bbRLdev"/><br/>**bbRLdev**](https://github.com/bbRLdev) | 🌊 Improvements to OpenAI streaming logic and termination events. |
 | [<img src="https://github.com/nagug.png?size=64" width="64" alt="nagug"/><br/>**nagug**](https://github.com/nagug) | 🚀 Core architecture, high-density engine design, and project maintainer. |
 
