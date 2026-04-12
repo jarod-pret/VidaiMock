@@ -109,13 +109,23 @@ fn check_chaos_failure(config: &AppConfig, headers: &HeaderMap) -> Option<Respon
     None
 }
 
-/// Resolves a status_code config value to an HTTP StatusCode.
-/// Supports static codes ("400") or Tera expressions ("{{ path_segments | last }}").
+/// Resolves the HTTP status code for a response.
+/// Priority: X-Mock-Status header > provider status_code config > 200.
 fn resolve_status_code(
+    headers: &HeaderMap,
     status_code: Option<&str>,
     context: &tera::Context,
     state: &Arc<AppState>,
 ) -> StatusCode {
+    // Header override takes precedence — allows any endpoint to return any status
+    if let Some(val) = headers.get("x-mock-status") {
+        if let Ok(code) = val.to_str().unwrap_or_default().parse::<u16>() {
+            if let Ok(status) = StatusCode::from_u16(code) {
+                return status;
+            }
+        }
+    }
+
     match status_code {
         None => StatusCode::OK,
         Some(raw) => {
@@ -226,7 +236,7 @@ pub async fn mock_handler(
              return (StatusCode::NOT_FOUND, "No response template defined").into_response();
         };
 
-        let status = resolve_status_code(provider.status_code.as_deref(), &context, &state);
+        let status = resolve_status_code(&headers, provider.status_code.as_deref(), &context, &state);
         let mut response = Response::new(axum::body::Body::from(rendered));
         *response.status_mut() = status;
         response.headers_mut().insert(
@@ -373,7 +383,7 @@ pub async fn streaming_handler(
             if trickle_ms == 0 { trickle_ms = 20; }
 
             let state_inner = state_clone.clone();
-            let stream_status = resolve_status_code(provider.status_code.as_deref(), &base_context, &state);
+            let stream_status = resolve_status_code(&headers, provider.status_code.as_deref(), &base_context, &state);
 
             let stream = stream::unfold((0, chunks, full_response, base_context, lifecycle, state_inner, trickle_ms, disconnect_pct, stream_fmt, encoding.clone(), is_raw_frame),
                 move |(idx, chunks, full_response, mut ctx, lifecycle, state, trickle_ms, disconnect_pct, stream_fmt, encoding, is_raw_frame)| async move {
