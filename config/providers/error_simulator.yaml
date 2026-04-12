@@ -2,4 +2,3 @@ name: "error-simulator"
 matcher: "^/error/\\d+$"
 status_code: "{{ path_segments | last }}"
 response_template: "error/generic.json.j2"
-priority: 10

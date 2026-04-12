@@ -1,5 +1,6 @@
 name: "openai"
 matcher: "^/v1/chat/completions$"
+priority: 1
 response_template: "openai/chat.json.j2"
 stream:
   enabled: true

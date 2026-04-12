@@ -1,7 +1,8 @@
 name: openai-compatible
-# Matches standard /v1/chat/completions
-# This serves as a catch-all for any OpenAI-compatible client
+# Catch-all for OpenAI-compatible clients. Lower priority than openai.yaml
+# so the exact-match provider with smart branching wins for /v1/chat/completions.
 matcher: "/v1/chat/completions"
+priority: -1
 request_mapping:
   model: "{{ json.model | default(value='mock-model') }}"
 stream:
