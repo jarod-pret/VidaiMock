@@ -55,7 +55,8 @@ Plus: Tool calling (OpenAI `tool_calls` + Anthropic `tool_use` + Gemini `functio
 - **🌊 Physics-Accurate Streaming**: Realistic TTFT and token-by-token delivery with **provider-native streaming payloads** (OpenAI SSE, Responses API typed events, Anthropic EventStream, Gemini, etc.)
 - **⚡ High Performance**: 50,000+ RPS in benchmark mode
 - **🎛️ Chaos & Error Testing**: Inject failures, latency, malformed responses, and **custom HTTP status codes** (400, 401, 404, 429, 500, etc.) for error path testing
-- **🧠 Smart Response Branching**: Templates auto-detect tool calls (OpenAI `tools` + Gemini `functionDeclarations`), reasoning models (o-series), structured output, and respond with the correct shape
+- **🧠 Smart Response Branching**: Templates auto-detect tool calls (OpenAI `tool_calls`, Anthropic `tool_use`, Gemini `functionCall`), reasoning models (o-series), structured output, and respond with the correct shape
+- **🎯 Per-Request Overrides**: `X-Mock-Status` header returns any HTTP status on any endpoint — test error paths on real provider routes without path rewriting
 - **📝 Customizable**: YAML configs + Tera templates for any API
 
 ## 🛡️ Built for Vidai.Server
@@ -69,8 +70,9 @@ Unlike tools that just record and replay static data or intercept browser reques
 
 *   **Truly Dynamic**: Every response is a Tera template. You can reflect request data, generate random IDs, or use complex logic to make your mock feel alive.
 *   **Physics-Accurate**: Emulates real-world network protocols (SSE, EventStream) and silver-level latency.
-*   **Error Path Testing**: Custom HTTP status codes (static or dynamic) let you test upstream error handling — 400s, 401s, 404s, 429s, 500s — with provider-accurate error envelopes.
-*   **Smart Branching**: Chat templates auto-detect `tools`, `response_format`, and reasoning models (o1/o3/o4-series) from the request and return the correctly shaped response — no per-scenario config needed.
+*   **Error Path Testing**: Custom HTTP status codes via `status_code` in YAML (static or dynamic) and `X-Mock-Status` request header let you test upstream error handling — 400s, 401s, 404s, 429s, 500s — on any real provider endpoint without path rewriting.
+*   **Smart Branching**: Templates auto-detect OpenAI `tools`/`response_format`/o-series models, Anthropic `tools`, and Gemini `functionDeclarations` from the request and return the correctly shaped response — no per-scenario config needed.
+*   **Typed SSE Streaming**: Beyond plain `data:` chunks — supports OpenAI Responses API typed events (`response.output_text.delta`, etc.), Anthropic's 7-event lifecycle (`content_block_start`, `message_delta`, `ping`, etc.), and `stream_options.include_usage` for final usage chunks.
 
 ## 📂 Project Structure
 
@@ -184,6 +186,12 @@ curl http://localhost:8100/v1beta/models
 curl http://localhost:8100/error/400 -H "Content-Type: application/json" -d '{}'
 curl http://localhost:8100/error/429 -H "Content-Type: application/json" -d '{}'
 
+# X-Mock-Status header — force any HTTP status on any real endpoint
+# Returns HTTP 429 with the normal response body for error passthrough testing
+curl -H "X-Mock-Status: 429" http://localhost:8100/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gpt-4", "messages": [{"role": "user", "content": "Hi"}]}'
+
 # Anthropic messages
 curl http://localhost:8100/v1/messages \
   -H "Content-Type: application/json" \
@@ -219,13 +227,34 @@ For more information about Vidai, visit our [Home Page](https://Vidai.uk).
 Usage: vidaimock [OPTIONS]
 
 Options:
-  --host <HOST>        Bind address [default: 0.0.0.0]
-  -p, --port <PORT>    Listen port [default: 8100]
-  --latency <MS>       Base response delay
-  --mode <MODE>        benchmark | realistic
-  --config-dir <DIR>   Custom provider configs
-  -h, --help           Print help
+  --host <HOST>              Bind address [default: 0.0.0.0]
+  -p, --port <PORT>          Listen port [default: 8100]
+  -w, --workers <N>          Worker threads [default: num cpus]
+  --config <FILE>            Config file path [default: mock-server.toml]
+  --config-dir <DIR>         Custom provider configs directory (overlays bundled)
+  --latency <MS>             Base response delay in milliseconds
+  --mode <MODE>              benchmark | realistic | debug
+  --endpoints <PATHS>        Comma-separated endpoints to serve (overrides config)
+  --format <FORMAT>          Response format: openai, anthropic, gemini, etc.
+  --response-file <FILE>     Custom response file for default endpoints
+  --content-type <TYPE>      Override Content-Type header
+  -h, --help                 Print help
+  -V, --version              Print version
 ```
+
+### Runtime Headers
+
+Any endpoint accepts these headers to override behavior per-request:
+
+| Header | Effect |
+|--------|--------|
+| `X-Mock-Status: <code>` | Return this HTTP status (e.g. `429`, `500`) instead of 200 |
+| `X-Vidai-Latency: <ms>` | Override base latency for this request |
+| `X-Vidai-Jitter: <pct>` | Override latency jitter percentage |
+| `X-Vidai-Chaos-Drop: <pct>` | Probability of simulated 500 |
+| `X-Vidai-Chaos-Malformed: <pct>` | Probability of malformed JSON response |
+| `X-Vidai-Chaos-Trickle: <ms>` | Per-chunk delay during streaming |
+| `X-Vidai-Chaos-Disconnect: <pct>` | Probability of mid-stream disconnect |
 
 ## 🎯 Provider Config Reference
 
