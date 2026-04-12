@@ -37,13 +37,17 @@ No configuration needed. These providers work immediately:
 | **OpenAI Images** | `/v1/images/generations` | — |
 | **OpenAI Moderations** | `/v1/moderations` | — |
 | **Anthropic** | `/v1/messages` | ✅ |
-| **Gemini** | `/v1beta/models/*` | ✅ |
+| **Gemini Generate** | `/v1beta/models/*:generateContent` | ✅ |
+| **Gemini Embeddings** | `/v1beta/models/*:embedContent` | — |
+| **Gemini Token Count** | `/v1beta/models/*:countTokens` | — |
+| **Gemini Models** | `GET /v1beta/models` | — |
+| **Gemini OpenAI Shim** | `/v1beta/openai/*` | ✅ |
 | **Azure OpenAI** | `/openai/deployments/*` | ✅ |
 | **Bedrock** | `/model/*/invoke` | ✅ |
 | **Cohere, Mistral, Groq** | OpenAI-compatible | ✅ |
 | **Error Simulator** | `/error/{code}` | — |
 
-Plus: Tool calling, reasoning model tokens, RAG citations, and more.
+Plus: Tool calling (OpenAI + Gemini `functionCall`), reasoning model tokens, Gemini 2.5 `thoughtsTokenCount`, RAG citations, and more.
 
 ## ✨ Key Features
 
@@ -51,7 +55,7 @@ Plus: Tool calling, reasoning model tokens, RAG citations, and more.
 - **🌊 Physics-Accurate Streaming**: Realistic TTFT and token-by-token delivery with **provider-native streaming payloads** (OpenAI SSE, Responses API typed events, Anthropic EventStream, Gemini, etc.)
 - **⚡ High Performance**: 50,000+ RPS in benchmark mode
 - **🎛️ Chaos & Error Testing**: Inject failures, latency, malformed responses, and **custom HTTP status codes** (400, 401, 404, 429, 500, etc.) for error path testing
-- **🧠 Smart Response Branching**: Chat templates auto-detect tool calls, reasoning models (o-series), structured output, and respond with the correct shape
+- **🧠 Smart Response Branching**: Templates auto-detect tool calls (OpenAI `tools` + Gemini `functionDeclarations`), reasoning models (o-series), structured output, and respond with the correct shape
 - **📝 Customizable**: YAML configs + Tera templates for any API
 
 ## 🛡️ Built for Vidai.Server
@@ -158,6 +162,23 @@ curl http://localhost:8100/v1/images/generations -H "Content-Type: application/j
   -d '{"model": "dall-e-2", "prompt": "a red circle", "n": 1}'
 curl http://localhost:8100/v1/moderations -H "Content-Type: application/json" \
   -d '{"model": "omni-moderation-latest", "input": "Hello"}'
+
+# Gemini generateContent
+curl http://localhost:8100/v1beta/models/gemini-2.5-flash:generateContent \
+  -H "Content-Type: application/json" \
+  -d '{"contents": [{"role": "user", "parts": [{"text": "Hello"}]}]}'
+
+# Gemini tool calling (returns functionCall)
+curl http://localhost:8100/v1beta/models/gemini-2.5-flash:generateContent \
+  -H "Content-Type: application/json" \
+  -d '{"contents": [{"role": "user", "parts": [{"text": "Weather?"}]}], "tools": [{"functionDeclarations": [{"name": "get_weather", "parameters": {"type": "OBJECT", "properties": {"city": {"type": "STRING"}}}}]}]}'
+
+# Gemini embedContent, countTokens, model listing
+curl http://localhost:8100/v1beta/models/gemini-embedding-001:embedContent \
+  -H "Content-Type: application/json" -d '{"content": {"parts": [{"text": "Hello"}]}}'
+curl http://localhost:8100/v1beta/models/gemini-2.5-flash:countTokens \
+  -H "Content-Type: application/json" -d '{"contents": [{"role": "user", "parts": [{"text": "Hello"}]}]}'
+curl http://localhost:8100/v1beta/models
 
 # Error simulation — any HTTP status code, provider-agnostic
 curl http://localhost:8100/error/400 -H "Content-Type: application/json" -d '{}'
