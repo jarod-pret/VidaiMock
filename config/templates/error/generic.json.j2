@@ -1,0 +1,21 @@
+{#
+   Generic error response template.
+
+   Provider-agnostic error envelope. The HTTP status code is set by
+   the provider config's status_code field (static or dynamic).
+
+   Use with the bundled error-simulator provider (/error/{code}) or
+   any custom provider with status_code configured.
+
+   Override with provider-specific error templates when you need
+   a particular envelope shape (e.g. OpenAI, Anthropic, etc).
+#}
+{% set code = path_segments | last | default(value="500") %}
+{
+  "error": {
+    "message": "Simulated error response (HTTP {{ code }})",
+    "type": "error",
+    "param": null,
+    "code": {{ code }}
+  }
+}

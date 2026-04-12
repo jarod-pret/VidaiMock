@@ -112,6 +112,13 @@ pub async fn create_app(config: AppConfig, metrics_handle: Option<PrometheusHand
     register_default!("/v1/chat/completions/stream", post, mock_handler);
     register_default!("/v1/models", get, models_handler);
     register_default!("/v1/embeddings", post, mock_handler);
+    register_default!("/v1/images/generations", post, mock_handler);
+    register_default!("/v1/responses", post, mock_handler);
+    register_default!("/v1/moderations", post, mock_handler);
+
+    // Error simulator
+    register_default!("/error/{code}", post, mock_handler);
+
     register_default!("/v1/engines/{engine}/embeddings", post, mock_handler);
     register_default!("/v1beta/models/{model_action}", post, mock_handler);
     // Gemini AI Studio /v1/models paths - POST for generateContent
@@ -236,6 +243,8 @@ mod tests {
             response_template: None,
             response_body: Some(r#"{"id": "test-id", "object": "chat.completion", "model": "test-model"}"#.to_string()),
             stream: None,
+            status_code: None,
+
             priority: 0,
         };
         registry.add_provider(config).unwrap();
@@ -331,6 +340,8 @@ mod tests {
             response_template: None,
             response_body: Some(r#"{"object": "chat.completion"}"#.to_string()),
             stream: None,
+            status_code: None,
+
             priority: 0,
         }).unwrap();
 
@@ -342,6 +353,8 @@ mod tests {
             response_template: None,
             response_body: Some(r#"{"type": "message"}"#.to_string()),
             stream: None,
+            status_code: None,
+
             priority: 0,
         }).unwrap();
 
@@ -353,6 +366,8 @@ mod tests {
             response_template: None,
             response_body: Some(r#"{"candidates": []}"#.to_string()),
             stream: None,
+            status_code: None,
+
             priority: 0,
         }).unwrap();
 

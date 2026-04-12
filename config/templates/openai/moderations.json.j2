@@ -1,0 +1,63 @@
+{#
+   OpenAI moderations response template.
+
+   Shape matches real /v1/moderations responses:
+     - top-level: {id, model, results: [{flagged, categories, category_scores, ...}]}
+     - NO usage block (moderations are free on OpenAI)
+     - results[0].categories: 13 boolean fields
+     - results[0].category_scores: 13 float fields
+#}
+{
+  "id": "modr-{{ uuid() }}",
+  "model": "{{ model }}",
+  "results": [
+    {
+      "flagged": false,
+      "categories": {
+        "sexual": false,
+        "hate": false,
+        "harassment": false,
+        "self-harm": false,
+        "sexual/minors": false,
+        "hate/threatening": false,
+        "violence/graphic": false,
+        "self-harm/intent": false,
+        "self-harm/instructions": false,
+        "harassment/threatening": false,
+        "violence": false,
+        "illicit": false,
+        "illicit/violent": false
+      },
+      "category_scores": {
+        "sexual": 0.000012,
+        "hate": 0.000003,
+        "harassment": 0.000045,
+        "self-harm": 0.000001,
+        "sexual/minors": 0.000001,
+        "hate/threatening": 0.000001,
+        "violence/graphic": 0.000002,
+        "self-harm/intent": 0.000001,
+        "self-harm/instructions": 0.000001,
+        "harassment/threatening": 0.000008,
+        "violence": 0.000015,
+        "illicit": 0.000003,
+        "illicit/violent": 0.000001
+      },
+      "category_applied_input_types": {
+        "sexual": ["text"],
+        "hate": ["text"],
+        "harassment": ["text"],
+        "self-harm": ["text"],
+        "sexual/minors": ["text"],
+        "hate/threatening": ["text"],
+        "violence/graphic": ["text"],
+        "self-harm/intent": ["text"],
+        "self-harm/instructions": ["text"],
+        "harassment/threatening": ["text"],
+        "violence": ["text"],
+        "illicit": ["text"],
+        "illicit/violent": ["text"]
+      }
+    }
+  ]
+}

@@ -1,0 +1,3 @@
+name: "openai-moderations"
+matcher: "^/v1/moderations$"
+response_template: "openai/moderations.json.j2"

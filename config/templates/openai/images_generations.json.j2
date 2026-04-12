@@ -1,0 +1,18 @@
+{#
+   OpenAI image generation response template.
+
+   Shape matches real /v1/images/generations responses:
+     - top-level: {created, data: [{url} | {b64_json}]}
+     - NO usage block (image-gen is priced per-image, not per-token)
+     - NO model field in response (model is in the request only)
+     - data[].revised_prompt present for dall-e-3+ (not for dall-e-2)
+#}
+{
+  "created": {{ timestamp() }},
+  "data": [
+    {
+      "url": "https://mock.vidaimock.local/images/{{ uuid() }}.png",
+      "revised_prompt": "A mock image for: {{ json.prompt | default(value='no prompt') }}"
+    }
+  ]
+}

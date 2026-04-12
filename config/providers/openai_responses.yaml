@@ -1,0 +1,13 @@
+name: "openai-responses"
+matcher: "^/v1/responses"
+response_template: "openai/responses.json.j2"
+stream:
+  enabled: true
+  frame_format: raw
+  lifecycle:
+    on_start:
+      template_path: "openai/responses_stream/start.j2"
+    on_chunk:
+      template_path: "openai/responses_stream/delta.j2"
+    on_stop:
+      template_path: "openai/responses_stream/stop.j2"

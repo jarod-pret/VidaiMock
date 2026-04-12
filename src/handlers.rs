@@ -109,6 +109,29 @@ fn check_chaos_failure(config: &AppConfig, headers: &HeaderMap) -> Option<Respon
     None
 }
 
+/// Resolves a status_code config value to an HTTP StatusCode.
+/// Supports static codes ("400") or Tera expressions ("{{ path_segments | last }}").
+fn resolve_status_code(
+    status_code: Option<&str>,
+    context: &tera::Context,
+    state: &Arc<AppState>,
+) -> StatusCode {
+    match status_code {
+        None => StatusCode::OK,
+        Some(raw) => {
+            let code_str = if raw.contains("{{") {
+                state.registry.render_str(raw, context).unwrap_or_default()
+            } else {
+                raw.to_string()
+            };
+            code_str.trim().parse::<u16>()
+                .ok()
+                .and_then(|code| StatusCode::from_u16(code).ok())
+                .unwrap_or(StatusCode::OK)
+        }
+    }
+}
+
 pub async fn health_check() -> impl IntoResponse {
     (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
 }
@@ -203,7 +226,9 @@ pub async fn mock_handler(
              return (StatusCode::NOT_FOUND, "No response template defined").into_response();
         };
 
+        let status = resolve_status_code(provider.status_code.as_deref(), &context, &state);
         let mut response = Response::new(axum::body::Body::from(rendered));
+        *response.status_mut() = status;
         response.headers_mut().insert(
             axum::http::header::CONTENT_TYPE,
              HeaderValue::from_static("application/json"),
@@ -327,6 +352,7 @@ pub async fn streaming_handler(
             let lifecycle = stream_config.lifecycle.clone();
             let stream_fmt = stream_config.format.clone();
             let encoding = stream_config.encoding.clone().unwrap_or_default(); // "aws-event-stream" or empty for SSE
+            let is_raw_frame = stream_config.frame_format.as_deref() == Some("raw");
             
             let mut trickle_ms = state.config.chaos.trickle_ms;
             let mut disconnect_pct = state.config.chaos.disconnect_pct;
@@ -347,9 +373,10 @@ pub async fn streaming_handler(
             if trickle_ms == 0 { trickle_ms = 20; }
 
             let state_inner = state_clone.clone();
+            let stream_status = resolve_status_code(provider.status_code.as_deref(), &base_context, &state);
 
-            let stream = stream::unfold((0, chunks, full_response, base_context, lifecycle, state_inner, trickle_ms, disconnect_pct, stream_fmt, encoding.clone()), 
-                move |(idx, chunks, full_response, mut ctx, lifecycle, state, trickle_ms, disconnect_pct, stream_fmt, encoding)| async move {
+            let stream = stream::unfold((0, chunks, full_response, base_context, lifecycle, state_inner, trickle_ms, disconnect_pct, stream_fmt, encoding.clone(), is_raw_frame),
+                move |(idx, chunks, full_response, mut ctx, lifecycle, state, trickle_ms, disconnect_pct, stream_fmt, encoding, is_raw_frame)| async move {
                 
                 // Chaos: Early Disconnect
                 if disconnect_pct > 0.0 {
@@ -424,9 +451,22 @@ pub async fn streaming_handler(
                     // Format output based on encoding
                     if encoding == "aws-event-stream" {
                         let bytes = crate::aws_event_stream::AwsEventStreamEncoder::encode_chunk(&data);
-                        Some((Ok::<_, Infallible>(axum::body::Bytes::from(bytes)), (next_idx, chunks, full_response, ctx, lifecycle, state, trickle_ms, disconnect_pct, stream_fmt, encoding)))
+                        Some((Ok::<_, Infallible>(axum::body::Bytes::from(bytes)), (next_idx, chunks, full_response, ctx, lifecycle, state, trickle_ms, disconnect_pct, stream_fmt, encoding, is_raw_frame)))
+                    } else if is_raw_frame {
+                        // Raw frame mode: emit template output verbatim with trailing newlines.
+                        // Template controls all framing (event: lines, data: lines, etc).
+                        let mut buf = Vec::new();
+                        for line in data.lines() {
+                            let line = line.trim();
+                            if !line.is_empty() {
+                                buf.extend_from_slice(line.as_bytes());
+                                buf.extend_from_slice(b"\n");
+                            }
+                        }
+                        buf.extend_from_slice(b"\n");
+                        Some((Ok::<_, Infallible>(axum::body::Bytes::from(buf)), (next_idx, chunks, full_response, ctx, lifecycle, state, trickle_ms, disconnect_pct, stream_fmt, encoding, is_raw_frame)))
                     } else {
-                        // SSE Format
+                        // SSE Format: auto-wrap with data: prefix
                         let minified = minify_json(data);
                         let mut buf = Vec::new();
 
@@ -445,18 +485,20 @@ pub async fn streaming_handler(
                         }
                         buf.extend_from_slice(format!("data: {}\n", minified).as_bytes());
                         buf.extend_from_slice(b"\n");
-                        Some((Ok::<_, Infallible>(axum::body::Bytes::from(buf)), (next_idx, chunks, full_response, ctx, lifecycle, state, trickle_ms, disconnect_pct, stream_fmt, encoding)))
+                        Some((Ok::<_, Infallible>(axum::body::Bytes::from(buf)), (next_idx, chunks, full_response, ctx, lifecycle, state, trickle_ms, disconnect_pct, stream_fmt, encoding, is_raw_frame)))
                     }
                 } else {
                      // Skip this tick (e.g. if start/stop event produced no data)
-                     Some((Ok::<_, Infallible>(axum::body::Bytes::new()), (next_idx, chunks, full_response, ctx, lifecycle, state, trickle_ms, disconnect_pct, stream_fmt, encoding)))
+                     Some((Ok::<_, Infallible>(axum::body::Bytes::new()), (next_idx, chunks, full_response, ctx, lifecycle, state, trickle_ms, disconnect_pct, stream_fmt, encoding, is_raw_frame)))
                 }
             });
             
             // Return Response
             let body = axum::body::Body::from_stream(stream);
             let mut response = Response::new(body);
-             
+
+            *response.status_mut() = stream_status;
+
             if provider.stream.as_ref().unwrap().encoding.as_deref() == Some("aws-event-stream") {
                 response.headers_mut().insert(axum::http::header::CONTENT_TYPE, HeaderValue::from_static("application/vnd.amazon.eventstream"));
             } else {
@@ -502,6 +544,23 @@ fn extract_content_value(json_str: &str) -> (serde_json::Value, bool) {
             }
         }
         
+        // OpenAI Responses API: output[].type=="message" -> content[0].text
+        if let Some(output_arr) = json.get("output").and_then(|o| o.as_array()) {
+            for item in output_arr {
+                if item.get("type").and_then(|t| t.as_str()) == Some("function_call") {
+                    return (serde_json::json!([item]), true);
+                }
+                if item.get("type").and_then(|t| t.as_str()) == Some("message") {
+                    if let Some(content_arr) = item.get("content").and_then(|c| c.as_array()) {
+                        if let Some(first_block) = content_arr.get(0) {
+                            if let Some(text) = first_block.get("text") {
+                                return (text.clone(), false);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         // Bedrock Converse: output.message.content[0].text
         if let Some(output) = json.get("output") {
             if let Some(message) = output.get("message") {

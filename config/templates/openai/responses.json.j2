@@ -1,0 +1,95 @@
+{#
+   OpenAI Responses API (/v1/responses) response template.
+
+   The Responses API envelope differs from chat.completions:
+     - 35+ top-level fields, output[] array of typed items
+     - usage uses input_tokens/output_tokens (not prompt/completion)
+
+   Handles:
+     - Baseline message response
+     - Reasoning model response (o-series: output has "reasoning" + "message" items)
+     - Tool call response (output has "function_call" item)
+#}
+{% set is_reasoning = false %}
+{% if json.model is defined %}
+  {% if json.model is starting_with("o1") or json.model is starting_with("o3") or json.model is starting_with("o4") %}
+    {% set is_reasoning = true %}
+  {% endif %}
+{% endif %}
+
+{% set has_tools = false %}
+{% if json.tools is defined %}
+  {% set has_tools = true %}
+{% endif %}
+
+{
+  "id": "resp_{{ uuid() }}",
+  "object": "response",
+  "created_at": {{ timestamp() }},
+  "status": "completed",
+  "background": false,
+  "billing": {"payer": "developer"},
+  "completed_at": {{ timestamp() }},
+  "error": null,
+  "incomplete_details": null,
+  "instructions": {{ json.instructions | default(value="null") | json_encode() }},
+  "max_output_tokens": {{ json.max_output_tokens | default(value=50) }},
+  "model": "{{ json.model | default(value='gpt-4o-mini') }}",
+  "output": [
+{% if is_reasoning %}
+    {
+      "id": "rs_{{ uuid() }}",
+      "type": "reasoning",
+      "summary": []
+    },
+{% endif %}
+{% if has_tools %}
+    {
+      "id": "fc_{{ uuid() }}",
+      "type": "function_call",
+      "call_id": "call_mock_{{ random_int(min=1000, max=9999) }}",
+      "name": "{{ json.tools.0.name | default(value='mock_function') }}",
+      "arguments": "{\"city\":\"Paris\"}",
+      "status": "completed"
+    }
+{% else %}
+    {
+      "id": "msg_{{ uuid() }}",
+      "type": "message",
+      "role": "assistant",
+      "status": "completed",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "This is a mock response from VidaiMock Responses API.",
+          "annotations": []
+        }
+      ]
+    }
+{% endif %}
+  ],
+  "parallel_tool_calls": true,
+  "previous_response_id": null,
+  "reasoning": {"effort": "medium", "summary": null},
+  "service_tier": "default",
+  "store": true,
+  "temperature": 1.0,
+  "text": {"format": {"type": "text"}},
+  "tool_choice": "auto",
+  "tools": [],
+  "top_p": 1.0,
+  "truncation": "disabled",
+  "usage": {
+    "input_tokens": 18,
+    "input_tokens_details": {
+      "cached_tokens": 0
+    },
+    "output_tokens": {% if is_reasoning %}153{% else %}25{% endif %},
+    "output_tokens_details": {
+      "reasoning_tokens": {% if is_reasoning %}128{% else %}0{% endif %}
+    },
+    "total_tokens": {% if is_reasoning %}171{% else %}43{% endif %}
+  },
+  "user": null,
+  "metadata": {}
+}

@@ -3,9 +3,14 @@ matcher: "^/v1/chat/completions$"
 response_template: "openai/chat.json.j2"
 stream:
   enabled: true
-  format: '{{ chunk }}' 
+  frame_format: raw
   lifecycle:
     on_chunk:
-       template_body: '{"id":"chatcmpl-mock","object":"chat.completion.chunk","created":1699000000,"model":"{{ model }}","choices":[{"index":0,"delta":{% if chunk is string %}{"content":"{{ chunk }}"}{% else %}{"tool_calls":{{ chunk | json_encode() }}}{% endif %},"finish_reason":null}]}'
+       template_body: 'data: {"id":"chatcmpl-mock","object":"chat.completion.chunk","created":1699000000,"model":"{{ model }}","choices":[{"index":0,"delta":{% if chunk is string %}{"content":"{{ chunk }}"}{% else %}{"tool_calls":{{ chunk | json_encode() }}}{% endif %},"finish_reason":null}]}'
     on_stop:
-       template_body: '[DONE]'
+       template_body: >
+         {% if json.stream_options is defined and json.stream_options.include_usage is defined and json.stream_options.include_usage %}
+         data: {"id":"chatcmpl-mock","object":"chat.completion.chunk","created":1699000000,"model":"{{ model }}","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":10,"total_tokens":20}}
+
+         {% endif %}
+         data: [DONE]

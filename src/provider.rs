@@ -47,6 +47,9 @@ pub struct ProviderConfig {
     pub response_body: Option<String>,
     #[serde(default)]
     pub stream: Option<ProviderStreamConfig>,
+    /// HTTP status code to return (default: 200). Supports static codes ("400")
+    /// or Tera expressions ("{{ path_segments | last }}") for dynamic extraction.
+    pub status_code: Option<String>,
     /// Priority for matching (higher matches first)
     #[serde(default)]
     pub priority: i32,
@@ -61,6 +64,10 @@ pub struct ProviderStreamConfig {
     pub format: Option<String>,
     /// Encoding for the stream (e.g. "aws-event-stream"). Default is SSE.
     pub encoding: Option<String>,
+    /// Controls SSE frame wrapping. Default "sse" auto-prefixes each chunk with "data: ".
+    /// Set to "raw" to emit template output verbatim — the template controls all framing
+    /// including event: and data: lines. Required for providers with typed SSE events.
+    pub frame_format: Option<String>,
     /// Detailed lifecycle events for complex streams (Anthropic, etc.)
     pub lifecycle: Option<StreamLifecycle>,
 }
