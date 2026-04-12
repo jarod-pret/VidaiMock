@@ -2,9 +2,10 @@ name: gemini
 # Gemini AI Studio endpoint pattern:
 # /v1/models/{model}:generateContent
 # /v1beta/models/{model}:streamGenerateContent
-matcher: "^/v1(beta)?/models/[^:]+:((generate|streamGenerate|embed)Content|countTokens)$"
+# embedContent and countTokens handled by dedicated higher-priority providers
+matcher: "^/v1(beta)?/models/[^:]+:(generate|streamGenerate)Content$"
 request_mapping:
-  model: "gemini-pro"
+  model: "gemini-2.5-flash"
 stream:
   enabled: true
   lifecycle:

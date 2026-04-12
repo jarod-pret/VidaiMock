@@ -1,0 +1,4 @@
+name: gemini_embed
+matcher: "^/v1(beta)?/models/[^:]+:embedContent$"
+priority: 10
+response_template: "gemini/embed_content.json.j2"

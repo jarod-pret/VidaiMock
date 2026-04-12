@@ -121,6 +121,9 @@ pub async fn create_app(config: AppConfig, metrics_handle: Option<PrometheusHand
 
     register_default!("/v1/engines/{engine}/embeddings", post, mock_handler);
     register_default!("/v1beta/models/{model_action}", post, mock_handler);
+    register_default!("/v1beta/models", get, models_handler);
+    register_default!("/v1beta/openai/models", get, models_handler);
+    register_default!("/v1beta/openai/embeddings", post, mock_handler);
     // Gemini AI Studio /v1/models paths - POST for generateContent
     register_default!("/v1/models/{model_action}", post, mock_handler);
     

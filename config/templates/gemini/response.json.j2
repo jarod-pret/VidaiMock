@@ -1,27 +1,64 @@
+{#
+   Gemini generateContent response template.
+
+   Branches on request fields:
+     - tools present -> functionCall with finishMessage
+     - default -> text response
+
+   Includes Gemini 2.5 fields: thoughtsTokenCount, promptTokensDetails,
+   modelVersion, responseId.
+#}
 {
   "candidates": [
     {
       "content": {
         "parts": [
+          {% if json.tools %}
           {
-            "text": "Gemini Mock Response. Time: {{ iso_timestamp() }}"
+            "functionCall": {
+              "name": "{{ json.tools.0.functionDeclarations.0.name | default(value='mock_function') }}",
+              "args": {}
+            }
           }
+          {% else %}
+          {
+            "text": "Gemini mock response. {{ iso_timestamp() }}"
+          }
+          {% endif %}
         ],
         "role": "model"
       },
+      {% if json.tools %}
       "finishReason": "STOP",
+      "finishMessage": "Model generated function call(s).",
+      {% else %}
+      "finishReason": "STOP",
+      {% endif %}
       "index": 0,
       "safetyRatings": [
         {
           "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+          "probability": "NEGLIGIBLE"
+        },
+        {
+          "category": "HARM_CATEGORY_HATE_SPEECH",
           "probability": "NEGLIGIBLE"
         }
       ]
     }
   ],
   "usageMetadata": {
-    "promptTokenCount": 5,
-    "candidatesTokenCount": 10,
-    "totalTokenCount": 15
-  }
+    "promptTokenCount": 10,
+    "candidatesTokenCount": 8,
+    "totalTokenCount": 40,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 10
+      }
+    ],
+    "thoughtsTokenCount": 22
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "mock-{{ uuid }}"
 }
