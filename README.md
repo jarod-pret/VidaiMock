@@ -31,21 +31,27 @@ No configuration needed. These providers work immediately:
 
 | Provider | Endpoint | Streaming |
 |----------|----------|-----------|
-| OpenAI | `/v1/chat/completions` | ✅ |
-| Anthropic | `/v1/messages` | ✅ |
-| Gemini | `/v1beta/models/*` | ✅ |
-| Azure OpenAI | `/openai/deployments/*` | ✅ |
-| Bedrock | `/model/*/invoke` | ✅ |
-| Cohere, Mistral, Groq | OpenAI-compatible | ✅ |
+| **OpenAI Chat** | `/v1/chat/completions` | ✅ |
+| **OpenAI Responses** | `/v1/responses` | ✅ (typed SSE events) |
+| **OpenAI Embeddings** | `/v1/embeddings` | — |
+| **OpenAI Images** | `/v1/images/generations` | — |
+| **OpenAI Moderations** | `/v1/moderations` | — |
+| **Anthropic** | `/v1/messages` | ✅ |
+| **Gemini** | `/v1beta/models/*` | ✅ |
+| **Azure OpenAI** | `/openai/deployments/*` | ✅ |
+| **Bedrock** | `/model/*/invoke` | ✅ |
+| **Cohere, Mistral, Groq** | OpenAI-compatible | ✅ |
+| **Error Simulator** | `/error/{code}` | — |
 
-Plus: Tool calling, RAG citations, embeddings, and more.
+Plus: Tool calling, reasoning model tokens, RAG citations, and more.
 
 ## ✨ Key Features
 
 - **🚀 Zero Config / Zero Fixtures**: Single **~7MB binary**, instant startup, no Docker/DB, and zero setup required.
-- **🌊 Physics-Accurate Streaming**: Realistic TTFT and token-by-token delivery with **provider-native streaming payloads** (OpenAI SSE, Anthropic EventStream, Gemini, etc.)
+- **🌊 Physics-Accurate Streaming**: Realistic TTFT and token-by-token delivery with **provider-native streaming payloads** (OpenAI SSE, Responses API typed events, Anthropic EventStream, Gemini, etc.)
 - **⚡ High Performance**: 50,000+ RPS in benchmark mode
-- **🎛️ Chaos Testing**: Inject failures, latency, malformed responses
+- **🎛️ Chaos & Error Testing**: Inject failures, latency, malformed responses, and **custom HTTP status codes** (400, 401, 404, 429, 500, etc.) for error path testing
+- **🧠 Smart Response Branching**: Chat templates auto-detect tool calls, reasoning models (o-series), structured output, and respond with the correct shape
 - **📝 Customizable**: YAML configs + Tera templates for any API
 
 ## 🛡️ Built for Vidai.Server
@@ -59,6 +65,8 @@ Unlike tools that just record and replay static data or intercept browser reques
 
 *   **Truly Dynamic**: Every response is a Tera template. You can reflect request data, generate random IDs, or use complex logic to make your mock feel alive.
 *   **Physics-Accurate**: Emulates real-world network protocols (SSE, EventStream) and silver-level latency.
+*   **Error Path Testing**: Custom HTTP status codes (static or dynamic) let you test upstream error handling — 400s, 401s, 404s, 429s, 500s — with provider-accurate error envelopes.
+*   **Smart Branching**: Chat templates auto-detect `tools`, `response_format`, and reasoning models (o1/o3/o4-series) from the request and return the correctly shaped response — no per-scenario config needed.
 
 ## 📂 Project Structure
 
@@ -115,17 +123,57 @@ cd vidaimock && cargo build --release
 ```bash
 # OpenAI chat completion
 curl http://localhost:8100/v1/chat/completions \
+  -H "Content-Type: application/json" \
   -d '{"model": "gpt-4", "messages": [{"role": "user", "content": "Hi"}]}'
+
+# Tool calling — auto-detects tools and returns tool_calls response
+curl http://localhost:8100/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gpt-4o", "messages": [{"role": "user", "content": "Weather?"}], "tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {}}}]}'
+
+# Reasoning models — returns reasoning_tokens in usage
+curl http://localhost:8100/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "o4-mini", "messages": [{"role": "user", "content": "2+2"}]}'
+
+# OpenAI Responses API (non-streaming)
+curl http://localhost:8100/v1/responses \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gpt-4o-mini", "input": "Say hello", "max_output_tokens": 50}'
+
+# OpenAI Responses API (streaming with typed SSE events)
+curl -N http://localhost:8100/v1/responses \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gpt-4o-mini", "input": "Say hello", "stream": true}'
+
+# Streaming with usage reporting
+curl -N http://localhost:8100/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gpt-4o", "stream": true, "stream_options": {"include_usage": true}, "messages": [{"role": "user", "content": "Hi"}]}'
+
+# Embeddings, images, moderations
+curl http://localhost:8100/v1/embeddings -H "Content-Type: application/json" \
+  -d '{"model": "text-embedding-3-small", "input": "Hello"}'
+curl http://localhost:8100/v1/images/generations -H "Content-Type: application/json" \
+  -d '{"model": "dall-e-2", "prompt": "a red circle", "n": 1}'
+curl http://localhost:8100/v1/moderations -H "Content-Type: application/json" \
+  -d '{"model": "omni-moderation-latest", "input": "Hello"}'
+
+# Error simulation — any HTTP status code, provider-agnostic
+curl http://localhost:8100/error/400 -H "Content-Type: application/json" -d '{}'
+curl http://localhost:8100/error/429 -H "Content-Type: application/json" -d '{}'
 
 # Anthropic messages
 curl http://localhost:8100/v1/messages \
+  -H "Content-Type: application/json" \
   -d '{"model": "claude-3", "messages": [{"role": "user", "content": "Hi"}]}'
 
 # With latency simulation
 ./vidaimock --latency 500 --mode realistic
 
-# Force errors (test retry logic)
-curl -H "X-Vidai-Chaos-Drop: 100" http://localhost:8100/v1/chat/completions ...
+# Force chaos errors (test retry logic)
+curl -H "X-Vidai-Chaos-Drop: 100" http://localhost:8100/v1/chat/completions \
+  -H "Content-Type: application/json" -d '{"model": "gpt-4", "messages": [{"role": "user", "content": "Hi"}]}'
 ```
 
 ## 📚 Documentation
@@ -147,6 +195,32 @@ Options:
   --config-dir <DIR>   Custom provider configs
   -h, --help           Print help
 ```
+
+## 🎯 Provider Config Reference
+
+Provider YAML files in `config/providers/` define how endpoints match and respond:
+
+```yaml
+name: "my-provider"
+matcher: "^/v1/my/endpoint$"         # Regex path match
+response_template: "my/template.j2"  # Tera template path
+status_code: "200"                   # HTTP status (static or Tera expression)
+priority: 10                         # Higher matches first
+stream:
+  enabled: true
+  frame_format: raw                  # "raw" = template controls SSE framing
+  lifecycle:
+    on_start:
+      template_path: "my/stream_start.j2"
+    on_chunk:
+      template_path: "my/stream_delta.j2"
+    on_stop:
+      template_path: "my/stream_stop.j2"
+```
+
+**`status_code`** accepts static values (`"400"`) or Tera expressions (`"{{ path_segments | last }}"`) for dynamic HTTP status codes. The bundled `/error/{code}` endpoint uses this to simulate any error.
+
+**`frame_format: raw`** gives the template full control over SSE framing — essential for providers like OpenAI's Responses API that use typed `event:` lines.
 
 ## 📄 License
 
