@@ -36,7 +36,7 @@ No configuration needed. These providers work immediately:
 | **OpenAI Embeddings** | `/v1/embeddings` | — |
 | **OpenAI Images** | `/v1/images/generations` | — |
 | **OpenAI Moderations** | `/v1/moderations` | — |
-| **Anthropic** | `/v1/messages` | ✅ |
+| **Anthropic** | `/v1/messages` | ✅ (all 7 SSE event types) |
 | **Gemini Generate** | `/v1beta/models/*:generateContent` | ✅ |
 | **Gemini Embeddings** | `/v1beta/models/*:embedContent` | — |
 | **Gemini Token Count** | `/v1beta/models/*:countTokens` | — |
@@ -47,7 +47,7 @@ No configuration needed. These providers work immediately:
 | **Cohere, Mistral, Groq** | OpenAI-compatible | ✅ |
 | **Error Simulator** | `/error/{code}` | — |
 
-Plus: Tool calling (OpenAI + Gemini `functionCall`), reasoning model tokens, Gemini 2.5 `thoughtsTokenCount`, RAG citations, and more.
+Plus: Tool calling (OpenAI `tool_calls` + Anthropic `tool_use` + Gemini `functionCall`), reasoning model tokens, Gemini 2.5 `thoughtsTokenCount`, Anthropic cache/cost fields, and more.
 
 ## ✨ Key Features
 
@@ -187,7 +187,17 @@ curl http://localhost:8100/error/429 -H "Content-Type: application/json" -d '{}'
 # Anthropic messages
 curl http://localhost:8100/v1/messages \
   -H "Content-Type: application/json" \
-  -d '{"model": "claude-3", "messages": [{"role": "user", "content": "Hi"}]}'
+  -d '{"model": "claude-haiku-4-5-20251001", "max_tokens": 200, "messages": [{"role": "user", "content": "Hi"}]}'
+
+# Anthropic tool calling (returns tool_use block)
+curl http://localhost:8100/v1/messages \
+  -H "Content-Type: application/json" \
+  -d '{"model": "claude-haiku-4-5-20251001", "max_tokens": 500, "messages": [{"role": "user", "content": "Weather in London?"}], "tools": [{"name": "get_weather", "description": "Get weather", "input_schema": {"type": "object", "properties": {"city": {"type": "string"}}}}]}'
+
+# Anthropic streaming (all 7 event types)
+curl -N http://localhost:8100/v1/messages \
+  -H "Content-Type: application/json" \
+  -d '{"model": "claude-haiku-4-5-20251001", "max_tokens": 200, "stream": true, "messages": [{"role": "user", "content": "Count to 5"}]}'
 
 # With latency simulation
 ./vidaimock --latency 500 --mode realistic
