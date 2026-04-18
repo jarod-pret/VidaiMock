@@ -37,7 +37,7 @@ No configuration needed. These providers work immediately:
 | **OpenAI Images** | `/v1/images/generations` | — |
 | **OpenAI Moderations** | `/v1/moderations` | — |
 | **Anthropic** | `/v1/messages` | ✅ (all 7 SSE event types) |
-| **Gemini Generate** | `/v1beta/models/*:generateContent` | ✅ |
+| **Gemini Generate** | `/v1beta/models/*:generateContent` | ✅ (text deltas + terminal `finishReason: STOP` chunk with `usageMetadata`, no `[DONE]`) |
 | **Gemini Embeddings** | `/v1beta/models/*:embedContent` | — |
 | **Gemini Token Count** | `/v1beta/models/*:countTokens` | — |
 | **Gemini Models** | `GET /v1beta/models` | — |
@@ -54,9 +54,11 @@ Plus: Tool calling (OpenAI `tool_calls` + Anthropic `tool_use` + Gemini `functio
 - **🚀 Zero Config / Zero Fixtures**: Single **~7MB binary**, instant startup, no Docker/DB, and zero setup required.
 - **🌊 Physics-Accurate Streaming**: Realistic TTFT and token-by-token delivery with **provider-native streaming payloads** (OpenAI SSE, Responses API typed events, Anthropic EventStream, Gemini, etc.)
 - **⚡ High Performance**: 50,000+ RPS in benchmark mode
-- **🎛️ Chaos & Error Testing**: Inject failures, latency, malformed responses, and **custom HTTP status codes** (400, 401, 404, 429, 500, etc.) for error path testing
+- **🎛️ Chaos & Error Testing**: Inject failures, latency, malformed responses, and **custom HTTP status codes** (400, 401, 404, 429, 500, etc.) — every error returns a **provider-shaped JSON envelope** (OpenAI, Anthropic, Gemini)
 - **🧠 Smart Response Branching**: Templates auto-detect tool calls (OpenAI `tool_calls`, Anthropic `tool_use`, Gemini `functionCall`), reasoning models (o-series), structured output, and respond with the correct shape
-- **🎯 Per-Request Overrides**: `X-Mock-Status` header returns any HTTP status on any endpoint — test error paths on real provider routes without path rewriting
+- **🎯 Per-Request Overrides**: `X-Mock-Status` header, `?chaos_status=500` URL query, and `X-Vidai-Chaos-*` headers all return real provider error envelopes — test error paths on real provider routes without path rewriting
+- **✅ Request Validation**: Known-required fields are enforced per provider (e.g. Anthropic `/v1/messages` without `max_tokens` → HTTP 400 with correct `invalid_request_error` envelope and a per-field message like `max_tokens: Field required`)
+- **🔬 SDK-Level Wire Accuracy**: Streams survive strict SDK parsers end-to-end — `openai-python`, `anthropic`, `google-genai` all iterate the mock without hand-crafted compat shims. Regression-tested byte-level against captured real-provider wire format.
 - **📝 Customizable**: YAML configs + Tera templates for any API
 
 ## 🛡️ Built for Vidai.Server
@@ -72,7 +74,7 @@ Unlike tools that just record and replay static data or intercept browser reques
 *   **Physics-Accurate**: Emulates real-world network protocols (SSE, EventStream) and silver-level latency.
 *   **Error Path Testing**: Custom HTTP status codes via `status_code` in YAML (static or dynamic) and `X-Mock-Status` request header let you test upstream error handling — 400s, 401s, 404s, 429s, 500s — on any real provider endpoint without path rewriting.
 *   **Smart Branching**: Templates auto-detect OpenAI `tools`/`response_format`/o-series models, Anthropic `tools`, and Gemini `functionDeclarations` from the request and return the correctly shaped response — no per-scenario config needed.
-*   **Typed SSE Streaming**: Beyond plain `data:` chunks — supports OpenAI Responses API typed events (`response.output_text.delta`, etc.), Anthropic's 7-event lifecycle (`content_block_start`, `message_delta`, `ping`, etc.), and `stream_options.include_usage` for final usage chunks.
+*   **Typed SSE Streaming**: Beyond plain `data:` chunks — supports OpenAI Responses API typed events (`response.output_text.delta`, etc.), Anthropic's 7-event lifecycle (`content_block_start`, `message_delta`, `ping`, etc.), Gemini's "text-delta chunks + terminal `finishReason` chunk" pattern, and `stream_options.include_usage` for final usage chunks.
 
 ## 📂 Project Structure
 
@@ -186,11 +188,24 @@ curl http://localhost:8100/v1beta/models
 curl http://localhost:8100/error/400 -H "Content-Type: application/json" -d '{}'
 curl http://localhost:8100/error/429 -H "Content-Type: application/json" -d '{}'
 
-# X-Mock-Status header — force any HTTP status on any real endpoint
-# Returns HTTP 429 with the normal response body for error passthrough testing
+# X-Mock-Status header — force any HTTP status on any real endpoint.
+# Returns HTTP 429 with an OpenAI-shape error envelope (provider-accurate).
 curl -H "X-Mock-Status: 429" http://localhost:8100/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model": "gpt-4", "messages": [{"role": "user", "content": "Hi"}]}'
+
+# ?chaos_status=503 URL query — stateless per-URL chaos.
+# Lets a gateway register one "broken" endpoint and one "healthy" endpoint
+# against the same mock instance for fallback/circuit-breaker testing.
+curl "http://localhost:8100/v1/chat/completions?chaos_status=503" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gpt-4", "messages": [{"role": "user", "content": "Hi"}]}'
+
+# Anthropic request validation — missing max_tokens returns real 400 envelope
+curl http://localhost:8100/v1/messages \
+  -H "Content-Type: application/json" \
+  -d '{"model": "claude", "messages": [{"role": "user", "content": "Hi"}]}'
+# -> HTTP 400 {"type":"error","error":{"type":"invalid_request_error","message":"max_tokens: Field required"}}
 
 # Anthropic messages
 curl http://localhost:8100/v1/messages \
@@ -263,8 +278,9 @@ Provider YAML files in `config/providers/` define how endpoints match and respon
 ```yaml
 name: "my-provider"
 matcher: "^/v1/my/endpoint$"         # Regex path match
-response_template: "my/template.j2"  # Tera template path
-status_code: "200"                   # HTTP status (static or Tera expression)
+response_template: "my/template.j2"  # Tera template path (HTTP 2xx responses)
+error_template: "my/error.j2"        # Tera template path (HTTP 4xx / 5xx responses)
+status_code: "200"                   # HTTP status — static or Tera expression
 priority: 10                         # Higher matches first
 stream:
   enabled: true
@@ -278,9 +294,38 @@ stream:
       template_path: "my/stream_stop.j2"
 ```
 
-**`status_code`** accepts static values (`"400"`) or Tera expressions (`"{{ path_segments | last }}"`) for dynamic HTTP status codes. The bundled `/error/{code}` endpoint uses this to simulate any error.
+**`status_code`** accepts static values (`"400"`) or Tera expressions
+(`"{% if json.max_tokens %}200{% else %}400{% endif %}"`) so a provider can
+validate required fields before returning success. Both `{{ ... }}` expressions
+and `{% ... %}` statements are rendered.
 
-**`frame_format: raw`** gives the template full control over SSE framing — essential for providers like OpenAI's Responses API that use typed `event:` lines.
+**`error_template`** is rendered instead of `response_template` whenever the
+resolved HTTP status is ≥ 400. This is how chaos injection, `X-Mock-Status`,
+`?chaos_status=`, and provider-side validation all produce correctly-shaped
+error envelopes (OpenAI's `{"error": {...}}`, Anthropic's `{"type":"error",...}`,
+Gemini's `{"error":{"code","message","status"}}`). The rendered template has a
+`status_code` variable in scope so it can self-describe per status.
+
+**`frame_format: raw`** gives the template full control over SSE framing —
+essential for providers like OpenAI's Responses API that use typed `event:`
+lines. The renderer preserves blank lines as frame separators so templates
+can emit multi-event sequences (e.g. terminal `finish_reason` chunk → usage
+chunk → `[DONE]`) without framing drift.
+
+### Chaos & error injection modes
+
+VidaiMock has four ways to trigger a non-200 response, all funnelling through
+the same `error_template` pipeline:
+
+| Trigger | Scope | Use case |
+|---|---|---|
+| `?chaos_status=503` URL query | Per URL | Gateway registers one "broken" and one "healthy" endpoint against the same mock instance — fallback/circuit-breaker testing |
+| `X-Mock-Status: 429` header | Per request | SDK-level test wants a specific status on a real provider route |
+| `X-Vidai-Chaos-Drop: 100` header | Probabilistic | Chaos testing; returns provider-shaped 500 JSON |
+| Provider `status_code` Tera expression | Per request field | Request validation (e.g. Anthropic's `max_tokens` requirement) |
+
+All four route to the provider's `error_template`, so SDK clients see a
+parseable error envelope regardless of how the failure was injected.
 
 ## 📄 License
 

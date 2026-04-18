@@ -1,0 +1,17 @@
+{#- OpenAI streaming terminal sequence.
+    Emitted after the last content chunk. Frames, in order:
+      1. Empty-delta chunk carrying finish_reason: "stop"
+      2. (Optional) Usage-only chunk when stream_options.include_usage is true
+      3. [DONE] sentinel
+    Blank lines between frames are required by the SSE spec so SDK parsers
+    treat each as a distinct event.
+
+    Blank lines appear as empty lines in the rendered output; the
+    raw-frame renderer preserves them as SSE frame separators. -#}
+data: {"id":"chatcmpl-mock","object":"chat.completion.chunk","created":1699000000,"model":"{{ model }}","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+{% if json.stream_options is defined and json.stream_options.include_usage is defined and json.stream_options.include_usage -%}
+data: {"id":"chatcmpl-mock","object":"chat.completion.chunk","created":1699000000,"model":"{{ model }}","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":10,"total_tokens":20}}
+
+{% endif -%}
+data: [DONE]

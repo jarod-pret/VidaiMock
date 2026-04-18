@@ -50,6 +50,12 @@ pub struct ProviderConfig {
     /// HTTP status code to return (default: 200). Supports static codes ("400")
     /// or Tera expressions ("{{ path_segments | last }}") for dynamic extraction.
     pub status_code: Option<String>,
+    /// Optional template rendered when a chaos/failure override triggers an error
+    /// response (e.g. `?chaos_status=500` query param, `X-Vidai-Chaos-Drop`).
+    /// Falls back to the standard `response_template` when absent.
+    /// Lets providers supply provider-shaped error envelopes
+    /// (OpenAI: `{"error": {...}}`, Anthropic: `{"type": "error", ...}`, etc.).
+    pub error_template: Option<String>,
     /// Priority for matching (higher matches first)
     #[serde(default)]
     pub priority: i32,

@@ -1,0 +1,26 @@
+{#- Gemini streaming intermediate chunk.
+
+    Per real Gemini `streamGenerateContent?alt=sse` behaviour:
+      - Intermediate chunks carry `finishReason: null` (the text is still flowing)
+      - Intermediate chunks do NOT carry `usageMetadata` (only the final chunk does)
+      - `modelVersion` and `responseId` ARE present on every chunk so clients can
+        correlate; the response id stays stable across chunks within one stream.
+
+    The content text is drawn from the per-chunk `chunk` context variable the
+    streaming engine injects. -#}
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {"text": "{{ chunk }}"}
+        ],
+        "role": "model"
+      },
+      "finishReason": null,
+      "index": 0
+    }
+  ],
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "mock-{{ uuid }}"
+}

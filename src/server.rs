@@ -247,11 +247,28 @@ mod tests {
             response_body: Some(r#"{"id": "test-id", "object": "chat.completion", "model": "test-model"}"#.to_string()),
             stream: None,
             status_code: None,
-
+            error_template: None,
             priority: 0,
         };
         registry.add_provider(config).unwrap();
         Arc::new(registry)
+    }
+
+    /// Loads the bundled embedded providers (OpenAI, Anthropic, Gemini, etc.).
+    /// Used for wire-shape regression tests that assert on real template output.
+    fn get_embedded_registry() -> Arc<crate::provider::ProviderRegistry> {
+        let mut registry = crate::provider::ProviderRegistry::new();
+        // Pass a non-existent dir so only embedded providers load (filesystem
+        // overlay empty). This mirrors the behaviour when a binary is run
+        // without --config-dir on a machine without a config/ directory.
+        registry.load_from_dir(&PathBuf::from("non_existent_dir_regression")).unwrap();
+        Arc::new(registry)
+    }
+
+    /// Collects an Axum streaming response body into a single Vec<u8>.
+    async fn drain_body(resp: axum::http::Response<Body>) -> Vec<u8> {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        bytes.to_vec()
     }
 
     #[tokio::test]
@@ -344,7 +361,7 @@ mod tests {
             response_body: Some(r#"{"object": "chat.completion"}"#.to_string()),
             stream: None,
             status_code: None,
-
+            error_template: None,
             priority: 0,
         }).unwrap();
 
@@ -357,7 +374,7 @@ mod tests {
             response_body: Some(r#"{"type": "message"}"#.to_string()),
             stream: None,
             status_code: None,
-
+            error_template: None,
             priority: 0,
         }).unwrap();
 
@@ -370,7 +387,7 @@ mod tests {
             response_body: Some(r#"{"candidates": []}"#.to_string()),
             stream: None,
             status_code: None,
-
+            error_template: None,
             priority: 0,
         }).unwrap();
 
@@ -417,8 +434,405 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        
+
         assert_eq!(body["port"], 0);
         assert_eq!(body["latency"]["mode"], "benchmark");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // SDK Compat regression suite (BUGS-VIDAIMOCK.md: VM-001 .. VM-008)
+    // Each test locks a specific wire-shape contract so regressions that would
+    // reintroduce an SDK-level parse failure fail in CI.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// VM-001: OpenAI streaming must emit a terminal chunk carrying
+    /// finish_reason = "stop" before the usage/[DONE] frames.
+    /// Real openai-python treats that chunk as the stream's terminal signal.
+    #[tokio::test]
+    async fn test_vm001_openai_stream_emits_finish_reason() {
+        let app = create_app(get_test_config(), None, get_embedded_registry()).await;
+        let body = r#"{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}],"max_tokens":5,"stream":true}"#;
+
+        let resp = app.oneshot(
+            Request::builder().method("POST").uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(body)).unwrap()
+        ).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let bytes = drain_body(resp).await;
+        let text = String::from_utf8(bytes).unwrap();
+
+        assert!(text.contains(r#""finish_reason":"stop""#),
+            "stream must include a chunk with finish_reason=stop before [DONE]; got:\n{}", text);
+        assert!(text.ends_with("data: [DONE]\n\n"),
+            "stream must end with 'data: [DONE]\\n\\n'; got tail:\n{}",
+            &text[text.len().saturating_sub(100)..]);
+    }
+
+    /// VM-002: every SSE event must end with a blank line (\n\n), including
+    /// the usage chunk that precedes [DONE] when stream_options.include_usage
+    /// is set. openai-python's SSE parser fails with JSONDecodeError otherwise.
+    #[tokio::test]
+    async fn test_vm002_openai_stream_usage_chunk_has_blank_line_terminator() {
+        let app = create_app(get_test_config(), None, get_embedded_registry()).await;
+        let body = r#"{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}],"max_tokens":5,"stream":true,"stream_options":{"include_usage":true}}"#;
+
+        let resp = app.oneshot(
+            Request::builder().method("POST").uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(body)).unwrap()
+        ).await.unwrap();
+        let text = String::from_utf8(drain_body(resp).await).unwrap();
+
+        // The usage chunk is the one with "usage":{"prompt_tokens":... .
+        // It must be followed by "\n\ndata: [DONE]" — not just "\ndata:".
+        assert!(text.contains("\"usage\":{"),
+            "stream must include a usage chunk when include_usage=true");
+        let usage_idx = text.find("\"usage\":{").unwrap();
+        let tail = &text[usage_idx..];
+        // Find the end of the usage JSON object, then assert \n\n follows.
+        let done_idx = tail.find("data: [DONE]")
+            .expect("expected [DONE] frame after usage chunk");
+        let between = &tail[..done_idx];
+        assert!(between.ends_with("\n\n"),
+            "usage chunk must be terminated with blank line before [DONE]; got bytes: {:?}",
+            between.as_bytes().iter().rev().take(6).rev().collect::<Vec<_>>());
+    }
+
+    /// VM-005: ?chaos_status=500 query param produces an OpenAI-shaped JSON
+    /// error envelope (provider error_template), not plain text or the
+    /// success body. Composes with the URL so gateways can register one
+    /// "broken" endpoint and another "healthy" endpoint against the same mock.
+    #[tokio::test]
+    async fn test_vm005_chaos_status_query_returns_provider_shape_error() {
+        let app = create_app(get_test_config(), None, get_embedded_registry()).await;
+        let body = r#"{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}"#;
+
+        let resp = app.oneshot(
+            Request::builder().method("POST").uri("/v1/chat/completions?chaos_status=503")
+                .header("content-type", "application/json")
+                .body(Body::from(body)).unwrap()
+        ).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let content_type = resp.headers().get("content-type").cloned();
+        let text = String::from_utf8(drain_body(resp).await).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&text)
+            .expect("chaos response must be valid JSON (not plain text)");
+
+        assert_eq!(content_type.unwrap().to_str().unwrap(), "application/json");
+        assert!(json.get("error").is_some(),
+            "OpenAI error envelope must have top-level 'error' key; got: {}", text);
+    }
+
+    /// VM-005 (streaming): ?chaos_status=500 on a streaming request must
+    /// return a non-streaming HTTP error (real providers don't send SSE
+    /// errors). Assert status + JSON body.
+    #[tokio::test]
+    async fn test_vm005_chaos_status_on_streaming_returns_non_streaming_error() {
+        let app = create_app(get_test_config(), None, get_embedded_registry()).await;
+        let body = r#"{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}],"stream":true}"#;
+
+        let resp = app.oneshot(
+            Request::builder().method("POST").uri("/v1/chat/completions?chaos_status=500")
+                .header("content-type", "application/json")
+                .body(Body::from(body)).unwrap()
+        ).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        // Body must be JSON, not SSE (no "data:" prefixes).
+        let text = String::from_utf8(drain_body(resp).await).unwrap();
+        assert!(!text.starts_with("data:"),
+            "chaos on streaming must return non-streaming JSON body; got:\n{}", text);
+        let _json: serde_json::Value = serde_json::from_str(&text)
+            .expect("streaming chaos response body must be valid JSON");
+    }
+
+    /// VM-005: X-Vidai-Chaos-Drop=100 must return a JSON error envelope,
+    /// not plain text. Previously returned "Simulated Internal Server Error"
+    /// as text/plain which no SDK can parse.
+    #[tokio::test]
+    async fn test_vm005_chaos_drop_header_returns_json_error_envelope() {
+        let app = create_app(get_test_config(), None, get_embedded_registry()).await;
+        let body = r#"{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}"#;
+
+        let resp = app.oneshot(
+            Request::builder().method("POST").uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-vidai-chaos-drop", "100")
+                .body(Body::from(body)).unwrap()
+        ).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let content_type = resp.headers().get("content-type").cloned()
+            .expect("missing content-type header");
+        assert_eq!(content_type.to_str().unwrap(), "application/json",
+            "chaos response must carry application/json content-type");
+
+        let text = String::from_utf8(drain_body(resp).await).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&text)
+            .expect("chaos response must be valid JSON");
+        assert!(json.get("error").is_some(),
+            "OpenAI error envelope must have top-level 'error' key");
+    }
+
+    /// VM-006: Anthropic streaming events must each be separated by a blank
+    /// line (`\n\n`) so SDK SSE parsers treat them as distinct events.
+    /// The symptom was "events out of order" but the root cause was frames
+    /// merging because blank lines were stripped by the raw-frame renderer.
+    #[tokio::test]
+    async fn test_vm006_anthropic_stream_events_have_blank_line_separators() {
+        let app = create_app(get_test_config(), None, get_embedded_registry()).await;
+        let body = r#"{"model":"claude","max_tokens":30,"stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
+
+        let resp = app.oneshot(
+            Request::builder().method("POST").uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(body)).unwrap()
+        ).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let text = String::from_utf8(drain_body(resp).await).unwrap();
+
+        // First event must be message_start.
+        let first_event_line = text.lines()
+            .find(|l| l.starts_with("event: "))
+            .expect("no event: lines found in Anthropic stream");
+        assert_eq!(first_event_line, "event: message_start",
+            "Anthropic streaming must start with message_start; got: {}", first_event_line);
+
+        // Every inter-event transition must be separated by `\n\n`.
+        // We check this by scanning for every occurrence of "\nevent:" and
+        // asserting the byte before the leading \n is another \n (i.e. a
+        // blank line precedes each event after the first).
+        // Skip the very first `event:` at the start of the stream.
+        let bytes = text.as_bytes();
+        let mut pos = 0usize;
+        let mut events_seen = 0usize;
+        while let Some(idx) = text[pos..].find("\nevent: ") {
+            let absolute = pos + idx;
+            // absolute is the \n before "event:". For the 2nd event onward,
+            // bytes[absolute - 1] must also be \n (i.e. a blank line).
+            if events_seen >= 1 {
+                assert!(absolute >= 1 && bytes[absolute - 1] == b'\n',
+                    "event at byte {} not preceded by blank line; context: {:?}",
+                    absolute,
+                    &text[absolute.saturating_sub(20)..(absolute + 20).min(text.len())]);
+            }
+            events_seen += 1;
+            pos = absolute + 1;
+        }
+        assert!(events_seen >= 7,
+            "expected at least 7 Anthropic event types; found {}", events_seen);
+    }
+
+    /// VM-006 (order): even with framing fixed, the event order itself
+    /// must be strict: message_start first, then content_block_start before
+    /// any content_block_delta.
+    #[tokio::test]
+    async fn test_vm006_anthropic_stream_event_order() {
+        let app = create_app(get_test_config(), None, get_embedded_registry()).await;
+        let body = r#"{"model":"claude","max_tokens":30,"stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
+
+        let resp = app.oneshot(
+            Request::builder().method("POST").uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(body)).unwrap()
+        ).await.unwrap();
+
+        let text = String::from_utf8(drain_body(resp).await).unwrap();
+        let events: Vec<&str> = text.lines()
+            .filter(|l| l.starts_with("event: "))
+            .collect();
+
+        // Find indices of the three ordering-critical events.
+        let pos_start = events.iter().position(|e| *e == "event: message_start")
+            .expect("missing message_start");
+        let pos_block_start = events.iter().position(|e| *e == "event: content_block_start")
+            .expect("missing content_block_start");
+        let pos_first_delta = events.iter().position(|e| *e == "event: content_block_delta")
+            .expect("missing content_block_delta");
+        let pos_stop = events.iter().position(|e| *e == "event: message_stop")
+            .expect("missing message_stop");
+
+        assert!(pos_start < pos_block_start,
+            "message_start must precede content_block_start");
+        assert!(pos_block_start < pos_first_delta,
+            "content_block_start must precede content_block_delta");
+        assert!(pos_first_delta < pos_stop,
+            "content_block_delta must precede message_stop");
+    }
+
+    /// VM-007: Anthropic `/v1/messages` without `max_tokens` must return
+    /// HTTP 400 with an Anthropic-shaped `{"type":"error","error":{...}}`
+    /// envelope, matching real Anthropic validation.
+    #[tokio::test]
+    async fn test_vm007_anthropic_missing_max_tokens_returns_400() {
+        let app = create_app(get_test_config(), None, get_embedded_registry()).await;
+        let body = r#"{"model":"claude","messages":[{"role":"user","content":"hi"}]}"#;
+
+        let resp = app.oneshot(
+            Request::builder().method("POST").uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(body)).unwrap()
+        ).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST,
+            "missing max_tokens must return HTTP 400");
+
+        let text = String::from_utf8(drain_body(resp).await).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&text)
+            .expect("error body must be valid JSON");
+        assert_eq!(json.get("type").and_then(|v| v.as_str()), Some("error"),
+            "Anthropic error envelope must have type=error; got: {}", text);
+        assert_eq!(
+            json["error"]["type"].as_str(),
+            Some("invalid_request_error"),
+            "Anthropic validation errors must carry type=invalid_request_error"
+        );
+        // Message must name the missing field (real Anthropic: "max_tokens: field required").
+        let message = json["error"]["message"].as_str().unwrap_or("");
+        assert!(
+            message.contains("max_tokens"),
+            "error message must name the missing field; got: {}",
+            message
+        );
+    }
+
+    /// VM-007: Request WITH max_tokens continues to succeed (regression guard —
+    /// the validation must be targeted, not blanket).
+    #[tokio::test]
+    async fn test_vm007_anthropic_with_max_tokens_returns_200() {
+        let app = create_app(get_test_config(), None, get_embedded_registry()).await;
+        let body = r#"{"model":"claude","max_tokens":30,"messages":[{"role":"user","content":"hi"}]}"#;
+
+        let resp = app.oneshot(
+            Request::builder().method("POST").uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(body)).unwrap()
+        ).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// VM-008: Gemini streamGenerateContent with alt=sse must NOT emit a
+    /// `data: [DONE]` sentinel. Real Gemini terminates on connection close;
+    /// a [DONE] frame causes google-genai SDK to raise UnknownApiResponseError.
+    #[tokio::test]
+    async fn test_vm008_gemini_stream_no_done_sentinel() {
+        let app = create_app(get_test_config(), None, get_embedded_registry()).await;
+        let body = r#"{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}"#;
+
+        let resp = app.oneshot(
+            Request::builder().method("POST")
+                .uri("/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse")
+                .header("content-type", "application/json")
+                .body(Body::from(body)).unwrap()
+        ).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let text = String::from_utf8(drain_body(resp).await).unwrap();
+
+        assert!(!text.contains("[DONE]"),
+            "Gemini stream must not emit [DONE] sentinel; got:\n{}", text);
+        // Must still contain at least one real data: frame.
+        assert!(text.contains("data: {"),
+            "Gemini stream should contain at least one JSON data frame");
+    }
+
+    /// VM-008 follow-up: Gemini streaming chunk shape contract.
+    /// Real Gemini puts finishReason + usageMetadata ONLY on the final chunk;
+    /// intermediate chunks have finishReason=null and no usageMetadata.
+    /// Regression guard against over-emission (which would make google-genai
+    /// SDK treat every chunk as a terminal signal and discard the rest).
+    #[tokio::test]
+    async fn test_vm008_gemini_stream_finishreason_only_on_final_chunk() {
+        let app = create_app(get_test_config(), None, get_embedded_registry()).await;
+        let body = r#"{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}"#;
+
+        let resp = app.oneshot(
+            Request::builder().method("POST")
+                .uri("/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse")
+                .header("content-type", "application/json")
+                .body(Body::from(body)).unwrap()
+        ).await.unwrap();
+
+        let text = String::from_utf8(drain_body(resp).await).unwrap();
+
+        // Collect JSON payloads from every `data:` frame.
+        let frames: Vec<serde_json::Value> = text.lines()
+            .filter_map(|l| l.strip_prefix("data: "))
+            .filter(|j| j.starts_with('{'))
+            .filter_map(|j| serde_json::from_str(j).ok())
+            .collect();
+
+        assert!(frames.len() >= 2,
+            "expected at least 2 frames (>=1 intermediate + 1 final); got {}",
+            frames.len());
+
+        // Final chunk must carry finishReason=STOP and usageMetadata.
+        let final_frame = frames.last().unwrap();
+        let final_finish = final_frame["candidates"][0]["finishReason"].as_str();
+        assert_eq!(final_finish, Some("STOP"),
+            "final chunk must carry finishReason=STOP; got frame: {}", final_frame);
+        assert!(final_frame.get("usageMetadata").is_some(),
+            "final chunk must carry usageMetadata; got: {}", final_frame);
+
+        // Every intermediate chunk must carry finishReason=null and must NOT
+        // carry usageMetadata. This is the specific shape google-genai SDK
+        // requires to continue iterating through the stream.
+        for (i, frame) in frames.iter().take(frames.len() - 1).enumerate() {
+            let finish = &frame["candidates"][0]["finishReason"];
+            assert!(
+                finish.is_null(),
+                "intermediate chunk {} must have finishReason=null; got {}; frame: {}",
+                i, finish, frame
+            );
+            assert!(
+                frame.get("usageMetadata").is_none(),
+                "intermediate chunk {} must NOT carry usageMetadata; got frame: {}",
+                i, frame
+            );
+        }
+    }
+
+    /// Regression: OpenAI non-streaming chat continues to return 200 with
+    /// a valid chat.completion shape even after the error_template + chaos
+    /// rewiring.
+    #[tokio::test]
+    async fn test_openai_non_streaming_still_works() {
+        let app = create_app(get_test_config(), None, get_embedded_registry()).await;
+        let body = r#"{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}"#;
+        let resp = app.oneshot(
+            Request::builder().method("POST").uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(body)).unwrap()
+        ).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let text = String::from_utf8(drain_body(resp).await).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["object"], "chat.completion");
+        assert!(json["choices"][0]["message"].is_object());
+    }
+
+    /// Regression: X-Mock-Status header retains its original behaviour —
+    /// forces an HTTP status while keeping the success body shape (the
+    /// contract documented for BFF-level passthrough tests).
+    #[tokio::test]
+    async fn test_xmockstatus_header_still_works() {
+        let app = create_app(get_test_config(), None, get_embedded_registry()).await;
+        let body = r#"{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}"#;
+        let resp = app.oneshot(
+            Request::builder().method("POST").uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-mock-status", "429")
+                .body(Body::from(body)).unwrap()
+        ).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        // Body is rendered from error_template (since status is an error).
+        let text = String::from_utf8(drain_body(resp).await).unwrap();
+        let _: serde_json::Value = serde_json::from_str(&text)
+            .expect("body must be valid JSON");
     }
 }
