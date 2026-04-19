@@ -5,7 +5,7 @@
 
 [Home Page](https://Vidai.uk) | [Documentation](https://vidai.uk/docs/mock/intro/)
 
-**Batteries-included mock server for LLM APIs** — works instantly with OpenAI, Anthropic, Gemini, Bedrock, and more. Zero config required.
+**Batteries-included mock server for LLM APIs and agents** — works instantly with OpenAI, Anthropic, Gemini, Bedrock, and more. Run ADK / LangGraph / LangChain agentic workflows against it without a single live-provider token. Zero config required.
 
 ## ⚡ 30-Second Demo
 
@@ -47,7 +47,7 @@ No configuration needed. These providers work immediately:
 | **Cohere, Mistral, Groq** | OpenAI-compatible | ✅ |
 | **Error Simulator** | `/error/{code}` | — |
 
-Plus: Tool calling (OpenAI `tool_calls` + Anthropic `tool_use` + Gemini `functionCall`), reasoning model tokens, Gemini 2.5 `thoughtsTokenCount`, Anthropic cache/cost fields, and more.
+Plus: Tool calling (OpenAI `tool_calls` + Anthropic `tool_use` + Gemini `functionCall`), **agentic loop termination** (tool-result detection across all three providers — see [Agentic Workflow Testing](#-agentic-workflow-testing)), reasoning model tokens, Gemini 2.5 `thoughtsTokenCount`, Anthropic cache/cost fields, and more.
 
 ## ✨ Key Features
 
@@ -76,6 +76,45 @@ Unlike tools that just record and replay static data or intercept browser reques
 *   **Error Path Testing**: Custom HTTP status codes via `status_code` in YAML (static or dynamic) and `X-Mock-Status` request header let you test upstream error handling — 400s, 401s, 404s, 429s, 500s — on any real provider endpoint without path rewriting.
 *   **Smart Branching**: Templates auto-detect OpenAI `tools`/`response_format`/o-series models, Anthropic `tools`, Gemini `functionDeclarations`, and tool-result presence in the message history — so agentic testing against ADK, LangGraph, and LangChain Runner loops terminates correctly instead of calling the mock forever.
 *   **Typed SSE Streaming**: Beyond plain `data:` chunks — supports OpenAI Responses API typed events (`response.output_text.delta`, etc.), Anthropic's 7-event lifecycle (`content_block_start`, `message_delta`, `ping`, etc.), Gemini's "text-delta chunks + terminal `finishReason` chunk" pattern, and `stream_options.include_usage` for final usage chunks.
+
+### 🤖 Agentic Workflow Testing
+
+Agent frameworks wrap an LLM in a tool-calling loop: **model → tool_call → tool executes → tool_result → model → …**. The loop terminates when the model stops requesting tools and produces a plain-text answer. Naïve mocks can't replicate this — they either always return tool calls (infinite loop) or never return them (breaks tool tests). VidaiMock's bundled chat templates do both, correctly:
+
+- **Tools defined + no tool result yet** → emit a `tool_call` / `tool_use` / `functionCall`
+- **Tools defined + tool result already in history** → emit plain-text synthesis with `finish_reason: "stop"` / `stop_reason: "end_turn"`
+
+The heuristic is a built-in Tera helper, `has_tool_result()`, that inspects the request's conversation history for:
+
+| Provider | Signal |
+|---|---|
+| OpenAI | message with `role: "tool"` |
+| Anthropic | user message whose `content[]` contains `type: "tool_result"` |
+| Gemini | user content whose `parts[]` contains `functionResponse` |
+
+This means you can run **Google ADK, LangGraph, or LangChain Runner loops end-to-end in CI against VidaiMock with zero live-provider spend** — the loop terminates naturally just like it does against real providers. Same heuristic works with custom provider templates; call `has_tool_result(messages=json.messages, provider="openai")` in your own `.j2` files.
+
+Concrete example — the full OpenAI round trip, no API key, no cost:
+
+```bash
+# Turn 1: user asks a question; mock returns a tool_call (because tools are defined).
+curl -s http://localhost:8100/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-4o","tools":[{"type":"function","function":{"name":"get_weather","parameters":{}}}],
+       "messages":[{"role":"user","content":"Weather in London?"}]}'
+# -> finish_reason: "tool_calls", message.tool_calls: [...]
+
+# Your agent executes the tool, appends the result, calls again.
+# Turn 2: same tools, now with a role:tool result in history.
+# Mock detects the tool result, returns plain-text synthesis instead of looping.
+curl -s http://localhost:8100/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-4o","tools":[{"type":"function","function":{"name":"get_weather","parameters":{}}}],
+       "messages":[
+         {"role":"user","content":"Weather in London?"},
+         {"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"get_weather","arguments":"{}"}}]},
+         {"role":"tool","tool_call_id":"c1","content":"15°C cloudy"}
+       ]}'
+# -> finish_reason: "stop", message.content: "Based on the tool results..."
+```
 
 ## 📂 Project Structure
 
