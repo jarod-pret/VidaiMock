@@ -19,7 +19,7 @@
 
 use crate::config::AppConfig;
 use crate::server::start_server;
-use crate::tenancy::build_runtime_store;
+use crate::tenancy::{build_runtime_store, TenantStoreHandle};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use mimalloc::MiMalloc;
 use tracing::{info, Level};
@@ -86,7 +86,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!(endpoints = ?endpoints, "Registered Endpoints");
     }
 
-    let tenants = build_runtime_store(&config)?;
+    let tenants = std::sync::Arc::new(TenantStoreHandle::new(build_runtime_store(&config)?));
 
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(workers as usize)

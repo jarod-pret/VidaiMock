@@ -454,6 +454,12 @@ value = "shared"
                 "mode": "multi",
                 "tenants_dir": "tenants",
                 "tenant_header": "x-tenant",
+                "admin_auth": {
+                    "header": "x-admin-key",
+                    "value": "admin-secret",
+                    "value_file": "/tmp/admin.key",
+                    "value_env": "ADMIN_KEY"
+                },
                 "tenants": [
                     {
                         "id": "acme",
@@ -486,6 +492,7 @@ value = "shared"
         .unwrap();
 
         assert_eq!(config.tenancy.tenants[0].keys[0].value, "inline-secret");
+        assert_eq!(config.tenancy.admin_auth.header, "x-admin-key");
         assert_eq!(
             config.tenancy.tenants[0].keys[0].value_file,
             Some(PathBuf::from("/tmp/acme.key"))
@@ -496,8 +503,13 @@ value = "shared"
         );
 
         let serialized = serde_json::to_value(&config).unwrap();
+        let admin_auth = &serialized["tenancy"]["admin_auth"];
         let key = &serialized["tenancy"]["tenants"][0]["keys"][0];
 
+        assert_eq!(admin_auth["header"], "x-admin-key");
+        assert!(admin_auth.get("value").is_none());
+        assert!(admin_auth.get("value_file").is_none());
+        assert!(admin_auth.get("value_env").is_none());
         assert_eq!(key["source"], "header");
         assert_eq!(key["name"], "x-api-key");
         assert!(key.get("value").is_none());

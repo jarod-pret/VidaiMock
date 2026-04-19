@@ -41,6 +41,8 @@ pub struct TenancyConfig {
     #[serde(default = "default_tenant_header")]
     pub tenant_header: String,
     #[serde(default)]
+    pub admin_auth: AdminAuthConfig,
+    #[serde(default)]
     pub tenants: Vec<TenantConfig>,
 }
 
@@ -50,6 +52,33 @@ fn default_tenants_dir() -> PathBuf {
 
 fn default_tenant_header() -> String {
     "x-tenant".to_string()
+}
+
+fn default_admin_auth_header() -> String {
+    "x-admin-key".to_string()
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+pub struct AdminAuthConfig {
+    #[serde(default = "default_admin_auth_header")]
+    pub header: String,
+    #[serde(default, skip_serializing)]
+    pub value: String,
+    #[serde(default, skip_serializing)]
+    pub value_file: Option<PathBuf>,
+    #[serde(default, skip_serializing)]
+    pub value_env: Option<String>,
+}
+
+impl Default for AdminAuthConfig {
+    fn default() -> Self {
+        Self {
+            header: default_admin_auth_header(),
+            value: String::new(),
+            value_file: None,
+            value_env: None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq, Eq)]
@@ -89,6 +118,7 @@ pub struct TenantSchema {
 
 impl TenancyConfig {
     pub fn validate(&self) -> Result<(), String> {
+        self.admin_auth.validate()?;
         self.validate_duplicate_tenant_ids()?;
         self.validate_lookup_uniqueness()?;
         Ok(())
@@ -116,6 +146,10 @@ impl TenancyConfig {
 
     pub fn normalized_tenant_header(&self) -> String {
         normalize_name(&self.tenant_header)
+    }
+
+    pub fn tenant_config(&self, tenant_id: &str) -> Option<&TenantConfig> {
+        self.tenants.iter().find(|tenant| tenant.id == tenant_id)
     }
 
     fn validate_duplicate_tenant_ids(&self) -> Result<(), String> {
@@ -204,6 +238,31 @@ impl TenancyConfig {
     }
 }
 
+impl AdminAuthConfig {
+    pub fn resolved_value(&self) -> Result<Option<String>, String> {
+        if self.value_file.is_none() && self.value_env.is_none() && self.value.trim().is_empty() {
+            return Ok(None);
+        }
+
+        resolve_secret_value(
+            "admin auth",
+            &self.header,
+            &self.value,
+            self.value_file.as_ref(),
+            self.value_env.as_deref(),
+        )
+        .map(Some)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.header.trim().is_empty() {
+            return Err("tenancy.admin_auth.header must be non-empty".to_string());
+        }
+
+        self.resolved_value().map(|_| ())
+    }
+}
+
 impl TenantConfig {
     pub fn requires_key(&self, tenant_header: &str) -> bool {
         self.keys
@@ -256,34 +315,13 @@ impl TenantKeyConfig {
     }
 
     pub fn resolved_value(&self) -> Result<String, String> {
-        let value = if let Some(path) = &self.value_file {
-            fs::read_to_string(path).map_err(|error| {
-                format!(
-                    "failed to read tenant secret file '{}': {}",
-                    path.display(),
-                    error
-                )
-            })?
-        } else if let Some(env_name) = &self.value_env {
-            std::env::var(env_name).map_err(|error| {
-                format!(
-                    "failed to read tenant secret env '{}' : {}",
-                    env_name, error
-                )
-            })?
-        } else {
-            self.value.clone()
-        };
-
-        let trimmed = value.trim().to_string();
-        if trimmed.is_empty() {
-            return Err(format!(
-                "tenant key '{}' from {:?} must resolve to a non-empty value",
-                self.name, self.source
-            ));
-        }
-
-        Ok(trimmed)
+        resolve_secret_value(
+            "tenant key",
+            &self.name,
+            &self.value,
+            self.value_file.as_ref(),
+            self.value_env.as_deref(),
+        )
     }
 
     fn describe(&self, resolved_value: &str) -> String {
@@ -341,6 +379,43 @@ fn normalize_secret_value(value: &str) -> String {
     value.trim().to_string()
 }
 
+fn resolve_secret_value(
+    kind: &str,
+    name: &str,
+    inline_value: &str,
+    value_file: Option<&PathBuf>,
+    value_env: Option<&str>,
+) -> Result<String, String> {
+    let value = if let Some(path) = value_file {
+        fs::read_to_string(path).map_err(|error| {
+            format!(
+                "failed to read {kind} secret file '{}': {}",
+                path.display(),
+                error
+            )
+        })?
+    } else if let Some(env_name) = value_env {
+        std::env::var(env_name).map_err(|error| {
+            format!(
+                "failed to read {kind} secret env '{}' : {}",
+                env_name, error
+            )
+        })?
+    } else {
+        inline_value.to_string()
+    };
+
+    let trimmed = value.trim().to_string();
+    if trimmed.is_empty() {
+        return Err(format!(
+            "{kind} '{}' must resolve to a non-empty value",
+            name
+        ));
+    }
+
+    Ok(trimmed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -365,6 +440,7 @@ mod tests {
             mode: TenancyMode::Multi,
             tenants_dir: PathBuf::from("tenants"),
             tenant_header: default_tenant_header(),
+            admin_auth: AdminAuthConfig::default(),
             tenants: vec![
                 TenantConfig {
                     id: "acme".to_string(),
@@ -404,6 +480,7 @@ mod tests {
             mode: TenancyMode::Multi,
             tenants_dir: PathBuf::from("tenants"),
             tenant_header: default_tenant_header(),
+            admin_auth: AdminAuthConfig::default(),
             tenants: vec![
                 TenantConfig {
                     id: "acme".to_string(),
@@ -426,6 +503,7 @@ mod tests {
             mode: TenancyMode::Multi,
             tenants_dir: PathBuf::from("tenants"),
             tenant_header: default_tenant_header(),
+            admin_auth: AdminAuthConfig::default(),
             tenants: vec![
                 TenantConfig {
                     id: "acme".to_string(),
@@ -460,6 +538,7 @@ mod tests {
             mode: TenancyMode::Multi,
             tenants_dir: PathBuf::from("tenants"),
             tenant_header: default_tenant_header(),
+            admin_auth: AdminAuthConfig::default(),
             tenants: vec![
                 TenantConfig {
                     id: "acme".to_string(),

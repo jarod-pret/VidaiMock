@@ -107,6 +107,28 @@ impl TenantStore {
         }
     }
 
+    pub fn has_explicit_tenant_signal(
+        &self,
+        headers: &HeaderMap,
+        query_params: &HashMap<String, String>,
+    ) -> bool {
+        headers
+            .get(&self.tenant_header_name)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| !value.trim().is_empty())
+            || self.known_header_key_names.iter().any(|key_name| {
+                headers
+                    .get(key_name)
+                    .and_then(|value| value.to_str().ok())
+                    .is_some_and(|value| !value.trim().is_empty())
+            })
+            || self.known_query_key_names.iter().any(|key_name| {
+                query_params
+                    .get(key_name)
+                    .is_some_and(|value| !value.trim().is_empty())
+            })
+    }
+
     fn accept(&self, tenant: Arc<TenantRuntime>) -> TenantResolution {
         TenantResolution {
             metrics: TenantRequestMetrics::Accepted {
@@ -239,7 +261,7 @@ fn request_key_variants(
 mod tests {
     use super::*;
     use crate::provider::ProviderRegistry;
-    use crate::tenancy::config::{TenancyConfig, TenantConfig, TenantKeyConfig};
+    use crate::tenancy::config::{AdminAuthConfig, TenancyConfig, TenantConfig, TenantKeyConfig};
     use std::collections::HashMap;
     use std::path::PathBuf;
 
@@ -254,6 +276,7 @@ mod tests {
             mode: TenancyMode::Multi,
             tenants_dir: PathBuf::from("tenants"),
             tenant_header: "x-tenant".to_string(),
+            admin_auth: AdminAuthConfig::default(),
             tenants,
         };
 

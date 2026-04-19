@@ -20,7 +20,7 @@
 use crate::replacer::Replacer;
 use axum::{
     body::Bytes,
-    extract::{Json, OriginalUri, Query},
+    extract::{Json, OriginalUri, Path, Query},
     http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Extension,
@@ -37,15 +37,15 @@ use tokio::time::{sleep, Duration};
 use crate::config::AppConfig;
 use crate::provider::ProviderRegistry;
 use crate::tenancy::{
-    TenantRequestMetrics, TenantResolution, TenantResolutionError, TenantResolutionRejection,
-    TenantStore,
+    list_tenants, tenant_view, ReloadView, TenancyMode, TenantRequestMetrics, TenantResolution,
+    TenantResolutionError, TenantResolutionRejection, TenantStoreHandle,
 };
 // use crate::formats::load_response; // Function removed/unused
 
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<AppConfig>,
-    pub tenants: Arc<TenantStore>,
+    pub tenants: Arc<TenantStoreHandle>,
 }
 
 /// Apply configured latency delay for realistic simulation mode
@@ -198,12 +198,170 @@ fn resolve_tenant_or_reject(
 ) -> Result<TenantResolution, Response> {
     state
         .tenants
+        .current()
         .resolve_request(headers, query_params)
         .map_err(tenant_rejection_response)
 }
 
+fn resolve_tenant_admin_or_reject(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    query_params: &HashMap<String, String>,
+) -> Result<TenantResolution, Response> {
+    let store = state.tenants.current();
+    if state.config.tenancy.mode == TenancyMode::Multi
+        && !store.has_explicit_tenant_signal(headers, query_params)
+    {
+        return Err((StatusCode::UNAUTHORIZED, "Tenant admin auth required.").into_response());
+    }
+
+    store
+        .resolve_request(headers, query_params)
+        .map_err(tenant_rejection_response)
+}
+
+fn authorize_admin_or_reject(state: &Arc<AppState>, headers: &HeaderMap) -> Result<(), Response> {
+    let admin_auth = &state.config.tenancy.admin_auth;
+    let Some(expected_secret) = admin_auth.resolved_value().map_err(|error| {
+        tracing::error!("Failed to resolve admin auth config: {}", error);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Admin auth configuration error.",
+        )
+            .into_response()
+    })?
+    else {
+        tracing::warn!("Admin endpoint access denied because admin auth is not configured");
+        return Err((StatusCode::UNAUTHORIZED, "Admin authentication required.").into_response());
+    };
+
+    let Some(provided) = headers
+        .get(admin_auth.header.as_str())
+        .and_then(|value| value.to_str().ok())
+    else {
+        return Err((StatusCode::UNAUTHORIZED, "Admin authentication required.").into_response());
+    };
+
+    let provided = provided.trim();
+    let header_matches = provided == expected_secret
+        || (admin_auth.header.eq_ignore_ascii_case("authorization")
+            && provided
+                .strip_prefix("Bearer ")
+                .or_else(|| provided.strip_prefix("bearer "))
+                .is_some_and(|value| value.trim() == expected_secret));
+
+    if header_matches {
+        Ok(())
+    } else {
+        Err((StatusCode::UNAUTHORIZED, "Admin authentication required.").into_response())
+    }
+}
+
+fn internal_error_response(message: &str, error: impl std::fmt::Display) -> Response {
+    tracing::error!("{}: {}", message, error);
+    (StatusCode::INTERNAL_SERVER_ERROR, format!("{}.", message)).into_response()
+}
+
 pub async fn status_handler(Extension(state): Extension<Arc<AppState>>) -> Json<AppConfig> {
     Json(state.config.as_ref().clone())
+}
+
+pub async fn admin_tenants_handler(
+    Extension(state): Extension<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) = authorize_admin_or_reject(&state, &headers) {
+        return response;
+    }
+
+    let store = state.tenants.current();
+    Json(list_tenants(&state.config, &store)).into_response()
+}
+
+pub async fn admin_tenant_handler(
+    Extension(state): Extension<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(tenant_id): Path<String>,
+) -> Response {
+    if let Err(response) = authorize_admin_or_reject(&state, &headers) {
+        return response;
+    }
+
+    let store = state.tenants.current();
+    let Some(view) = tenant_view(&state.config, &store, &tenant_id) else {
+        return (StatusCode::NOT_FOUND, "Unknown tenant.").into_response();
+    };
+
+    Json(view).into_response()
+}
+
+pub async fn admin_reload_handler(
+    Extension(state): Extension<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) = authorize_admin_or_reject(&state, &headers) {
+        return response;
+    }
+
+    let store = match state.tenants.reload_all(&state.config) {
+        Ok(store) => store,
+        Err(error) => return internal_error_response("Reload failed", error),
+    };
+
+    let reloaded = list_tenants(&state.config, &store)
+        .tenants
+        .into_iter()
+        .map(|tenant| tenant.id)
+        .collect();
+
+    Json(ReloadView { reloaded }).into_response()
+}
+
+pub async fn tenant_handler(
+    Extension(state): Extension<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query_params): Query<HashMap<String, String>>,
+) -> Response {
+    let resolution = match resolve_tenant_admin_or_reject(&state, &headers, &query_params) {
+        Ok(resolution) => resolution,
+        Err(response) => return response,
+    };
+
+    let store = state.tenants.current();
+    let Some(view) = tenant_view(&state.config, &store, &resolution.tenant.label) else {
+        return internal_error_response(
+            "Tenant inspection failed",
+            format!("missing runtime for tenant '{}'", resolution.tenant.label),
+        );
+    };
+
+    response_with_metrics(Json(view).into_response(), resolution.metrics)
+}
+
+pub async fn tenant_reload_handler(
+    Extension(state): Extension<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query_params): Query<HashMap<String, String>>,
+) -> Response {
+    let resolution = match resolve_tenant_admin_or_reject(&state, &headers, &query_params) {
+        Ok(resolution) => resolution,
+        Err(response) => return response,
+    };
+
+    if let Err(error) = state
+        .tenants
+        .reload_tenant(&state.config, &resolution.tenant.label)
+    {
+        return internal_error_response("Reload failed", error);
+    }
+
+    response_with_metrics(
+        Json(ReloadView {
+            reloaded: vec![resolution.tenant.label.clone()],
+        })
+        .into_response(),
+        resolution.metrics,
+    )
 }
 
 pub async fn mock_handler(
