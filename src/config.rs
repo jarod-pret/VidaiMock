@@ -22,6 +22,8 @@ use config::{Config, File};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use crate::tenancy::TenancyConfig;
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct AppConfig {
     #[serde(default = "default_host")]
@@ -30,6 +32,8 @@ pub struct AppConfig {
     pub workers: usize,
     pub log_level: String,
     pub config_dir: PathBuf,
+    #[serde(default)]
+    pub tenancy: TenancyConfig,
     #[serde(default)]
     pub latency: LatencyConfig,
     #[serde(default)]
@@ -90,7 +94,7 @@ pub struct Cli {
     /// Directory containing provider configurations
     #[arg(long)]
     pub config_dir: Option<PathBuf>,
-    
+
     /// Latency in milliseconds
     #[arg(long)]
     pub latency: Option<u64>,
@@ -106,7 +110,7 @@ pub struct Cli {
     /// Comma-separated list of endpoints to serve (overrides config)
     #[arg(long, value_delimiter = ',')]
     pub endpoints: Option<Vec<String>>,
-    
+
     /// Response format to use (openai, anthropic, etc.)
     #[arg(long)]
     pub format: Option<String>,
@@ -129,11 +133,11 @@ impl AppConfig {
             .set_default("workers", num_cpus::get() as i64)?
             .set_default("log_level", "error")?
             .set_default("config_dir", "config")?;
-            // Latency & Endpoints defaults handled by serde(default)
+        // Latency & Endpoints defaults handled by serde(default)
 
         // Load from file if exists
         if args.config.exists() {
-             settings = settings.add_source(File::from(args.config.clone()));
+            settings = settings.add_source(File::from(args.config.clone()));
         }
 
         // Environment variables (e.g., VIDAIMOCK_PORT, VIDAIMOCK_WORKERS)
@@ -161,42 +165,63 @@ impl AppConfig {
         if let Some(dir) = args.config_dir {
             config.config_dir = dir;
         }
-        
+
         config.response_file = args.response_file;
 
         // If endpoints provided via CLI, we construct a simple config where all endpoints use the specified (or default "openai") format
         if let Some(cli_endpoints) = args.endpoints {
             let default_format = args.format.unwrap_or_else(|| "openai".to_string());
             let content_type = args.content_type.clone();
-            config.endpoints = cli_endpoints.into_iter().map(|s| {
-                if s.contains(':') {
-                    let parts: Vec<&str> = s.splitn(2, ':').collect();
-                    EndpointConfig {
-                        path: parts[0].to_string(),
-                        format: parts[1].to_string(),
-                        content_type: content_type.clone(),
+            config.endpoints = cli_endpoints
+                .into_iter()
+                .map(|s| {
+                    if s.contains(':') {
+                        let parts: Vec<&str> = s.splitn(2, ':').collect();
+                        EndpointConfig {
+                            path: parts[0].to_string(),
+                            format: parts[1].to_string(),
+                            content_type: content_type.clone(),
+                        }
+                    } else {
+                        EndpointConfig {
+                            path: s,
+                            format: default_format.clone(),
+                            content_type: content_type.clone(),
+                        }
                     }
-                } else {
-                    EndpointConfig {
-                        path: s,
-                        format: default_format.clone(),
-                        content_type: content_type.clone(),
-                    }
-                }
-            }).collect();
+                })
+                .collect();
         } else if let Some(format) = args.format {
-             // If only format is specified but no endpoints, we might want to override the format of existing default endpoints or add a default one.
-             if config.endpoints.is_empty() {
-                 let path = match format.as_str() {
-                     "anthropic" => "/v1/messages",
-                     "gemini" => "/v1beta/models/gemini-pro:generateContent",
-                     _ => "/v1/chat/completions",
-                 };
-                 config.endpoints.push(EndpointConfig { path: path.to_string(), format, content_type: args.content_type });
-             }
+            // If only format is specified but no endpoints, we might want to override the format of existing default endpoints or add a default one.
+            if config.endpoints.is_empty() {
+                let path = match format.as_str() {
+                    "anthropic" => "/v1/messages",
+                    "gemini" => "/v1beta/models/gemini-pro:generateContent",
+                    _ => "/v1/chat/completions",
+                };
+                config.endpoints.push(EndpointConfig {
+                    path: path.to_string(),
+                    format,
+                    content_type: args.content_type,
+                });
+            }
         }
-        
+
+        config.validate()?;
+
         Ok(config)
+    }
+
+    pub fn validate(&self) -> Result<(), config::ConfigError> {
+        self.tenancy
+            .validate()
+            .map_err(config::ConfigError::Message)
+    }
+
+    pub fn runtime_registry_dir(&self) -> Result<PathBuf, config::ConfigError> {
+        self.tenancy
+            .runtime_registry_dir(&self.config_dir)
+            .map_err(config::ConfigError::Message)
     }
 }
 
@@ -247,7 +272,13 @@ mod tests {
 
     #[test]
     fn test_cli_endpoints_override() {
-        let args = Cli::parse_from(&["mock-server", "--endpoints", "/custom1,/custom2", "--format", "echo"]);
+        let args = Cli::parse_from(&[
+            "mock-server",
+            "--endpoints",
+            "/custom1,/custom2",
+            "--format",
+            "echo",
+        ]);
         let config = AppConfig::build_config(args).unwrap();
         assert_eq!(config.endpoints.len(), 2);
         assert_eq!(config.endpoints[0].path, "/custom1");
@@ -258,12 +289,158 @@ mod tests {
 
     #[test]
     fn test_cli_endpoints_with_formats() {
-        let args = Cli::parse_from(&["mock-server", "--endpoints", "/v1/chat:openai,/v1/test:echo"]);
+        let args = Cli::parse_from(&[
+            "mock-server",
+            "--endpoints",
+            "/v1/chat:openai,/v1/test:echo",
+        ]);
         let config = AppConfig::build_config(args).unwrap();
         assert_eq!(config.endpoints.len(), 2);
         assert_eq!(config.endpoints[0].path, "/v1/chat");
         assert_eq!(config.endpoints[0].format, "openai");
         assert_eq!(config.endpoints[1].path, "/v1/test");
         assert_eq!(config.endpoints[1].format, "echo");
+    }
+
+    #[test]
+    fn test_default_tenancy_mode_is_single() {
+        let args = Cli::parse_from(&["mock-server"]);
+        let config = AppConfig::build_config(args).unwrap();
+
+        assert_eq!(config.tenancy.mode, crate::tenancy::TenancyMode::Single);
+        assert_eq!(
+            config.tenancy.schema_roots(&config.config_dir),
+            vec![crate::tenancy::TenantSchema {
+                tenant_id: None,
+                root_dir: PathBuf::from("config"),
+            }]
+        );
+    }
+
+    #[test]
+    fn test_multi_tenancy_mode_uses_tenants_schema() {
+        let temp_path = std::env::current_dir()
+            .unwrap()
+            .join("target/test_multi_tenancy_mode.toml");
+
+        std::fs::create_dir_all(temp_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &temp_path,
+            r#"
+port = 8100
+workers = 4
+log_level = "info"
+
+[tenancy]
+mode = "multi"
+tenants_dir = "tenants"
+
+[[tenancy.tenants]]
+id = "acme"
+
+[[tenancy.tenants]]
+id = "globex"
+"#,
+        )
+        .unwrap();
+
+        let args = Cli::parse_from(&["mock-server", "--config", temp_path.to_str().unwrap()]);
+        let config = AppConfig::build_config(args).unwrap();
+
+        assert_eq!(config.tenancy.mode, crate::tenancy::TenancyMode::Multi);
+        assert_eq!(
+            config.tenancy.schema_roots(&config.config_dir),
+            vec![
+                crate::tenancy::TenantSchema {
+                    tenant_id: Some("acme".to_string()),
+                    root_dir: PathBuf::from("tenants/acme"),
+                },
+                crate::tenancy::TenantSchema {
+                    tenant_id: Some("globex".to_string()),
+                    root_dir: PathBuf::from("tenants/globex"),
+                },
+            ]
+        );
+        assert!(config.runtime_registry_dir().is_err());
+
+        std::fs::remove_file(temp_path).unwrap();
+    }
+
+    #[test]
+    fn test_duplicate_tenant_ids_fail_validation() {
+        let temp_path = std::env::current_dir()
+            .unwrap()
+            .join("target/test_duplicate_tenant_ids.toml");
+
+        std::fs::create_dir_all(temp_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &temp_path,
+            r#"
+port = 8100
+workers = 4
+log_level = "info"
+
+[tenancy]
+mode = "multi"
+
+[[tenancy.tenants]]
+id = "acme"
+
+[[tenancy.tenants]]
+id = "acme"
+"#,
+        )
+        .unwrap();
+
+        let args = Cli::parse_from(&["mock-server", "--config", temp_path.to_str().unwrap()]);
+        let error = AppConfig::build_config(args).unwrap_err();
+
+        assert!(error.to_string().contains("duplicate tenancy tenant id"));
+
+        std::fs::remove_file(temp_path).unwrap();
+    }
+
+    #[test]
+    fn test_ambiguous_tenant_key_matches_fail_validation() {
+        let temp_path = std::env::current_dir()
+            .unwrap()
+            .join("target/test_ambiguous_tenant_keys.toml");
+
+        std::fs::create_dir_all(temp_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &temp_path,
+            r#"
+port = 8100
+workers = 4
+log_level = "info"
+
+[tenancy]
+mode = "multi"
+
+[[tenancy.tenants]]
+id = "acme"
+
+[[tenancy.tenants.keys]]
+source = "header"
+name = "X-Tenant"
+value = "shared"
+
+[[tenancy.tenants]]
+id = "globex"
+
+[[tenancy.tenants.keys]]
+source = "header"
+name = "x-tenant"
+value = "shared"
+"#,
+        )
+        .unwrap();
+
+        let args = Cli::parse_from(&["mock-server", "--config", temp_path.to_str().unwrap()]);
+        let error = AppConfig::build_config(args).unwrap_err();
+
+        assert!(error.to_string().contains("ambiguous tenant key match"));
+
+        std::fs::remove_file(temp_path).unwrap();
     }
 }

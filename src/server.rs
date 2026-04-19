@@ -214,7 +214,8 @@ mod tests {
             port: 0,
             workers: 1,
             log_level: "debug".to_string(),
-            config_dir: PathBuf::from("config"), 
+            config_dir: PathBuf::from("config"),
+            tenancy: crate::tenancy::TenancyConfig::default(),
             latency: crate::config::LatencyConfig {
                 mode: "benchmark".to_string(),
                 base_ms: 0,

@@ -1,7 +1,17 @@
 port = 8100
 workers = 8
 log_level = "info"
-config_dir = "config" # Directory containing providers/ and templates/
+config_dir = "config" # Single mode schema root. In single mode, providers/ and templates/ live under config/
+
+[tenancy]
+mode = "single" # "single" uses config/ and stays backward-compatible. "multi" uses tenants/
+# tenants_dir = "tenants" # In multi mode, each tenant schema lives under tenants/<id>/
+# [[tenancy.tenants]]
+# id = "acme"
+# [[tenancy.tenants.keys]]
+# source = "header"
+# name = "x-tenant"
+# value = "acme"
 
 # Latency Simulation Configuration
 [latency]

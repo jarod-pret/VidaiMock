@@ -28,6 +28,7 @@ use metrics_exporter_prometheus::PrometheusBuilder;
 static GLOBAL: MiMalloc = MiMalloc;
 
 mod config;
+mod tenancy;
 // mod formats; // Removed
 mod handlers;
 mod replacer;
@@ -84,7 +85,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!(endpoints = ?endpoints, "Registered Endpoints");
     }
 
-    let registry = crate::provider::init_registry(&config.config_dir);
+    let registry_dir = config.runtime_registry_dir()?;
+    let registry = crate::provider::init_registry(&registry_dir);
 
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(workers as usize)
