@@ -217,12 +217,6 @@ impl AppConfig {
             .validate()
             .map_err(config::ConfigError::Message)
     }
-
-    pub fn runtime_registry_dir(&self) -> Result<PathBuf, config::ConfigError> {
-        self.tenancy
-            .runtime_registry_dir(&self.config_dir)
-            .map_err(config::ConfigError::Message)
-    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -254,6 +248,7 @@ impl Default for ChaosConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn test_cli_port_override() {
@@ -352,6 +347,10 @@ id = "globex"
             config.tenancy.schema_roots(&config.config_dir),
             vec![
                 crate::tenancy::TenantSchema {
+                    tenant_id: Some(crate::tenancy::DEFAULT_TENANT_ID.to_string()),
+                    root_dir: PathBuf::from("tenants/default"),
+                },
+                crate::tenancy::TenantSchema {
                     tenant_id: Some("acme".to_string()),
                     root_dir: PathBuf::from("tenants/acme"),
                 },
@@ -361,7 +360,6 @@ id = "globex"
                 },
             ]
         );
-        assert!(config.runtime_registry_dir().is_err());
 
         std::fs::remove_file(temp_path).unwrap();
     }
@@ -442,5 +440,68 @@ value = "shared"
         assert!(error.to_string().contains("ambiguous tenant key match"));
 
         std::fs::remove_file(temp_path).unwrap();
+    }
+
+    #[test]
+    fn test_app_config_serialization_omits_tenancy_secret_fields() {
+        let config: AppConfig = serde_json::from_value(json!({
+            "host": "127.0.0.1",
+            "port": 8100,
+            "workers": 4,
+            "log_level": "info",
+            "config_dir": "config",
+            "tenancy": {
+                "mode": "multi",
+                "tenants_dir": "tenants",
+                "tenant_header": "x-tenant",
+                "tenants": [
+                    {
+                        "id": "acme",
+                        "keys": [
+                            {
+                                "source": "header",
+                                "name": "x-api-key",
+                                "value": "inline-secret",
+                                "value_file": "/tmp/acme.key",
+                                "value_env": "ACME_KEY"
+                            }
+                        ]
+                    }
+                ]
+            },
+            "latency": {
+                "mode": "benchmark",
+                "base_ms": 0,
+                "jitter_pct": 0.0
+            },
+            "chaos": {
+                "enabled": false,
+                "malformed_pct": 0.0,
+                "drop_pct": 0.0,
+                "trickle_ms": 0,
+                "disconnect_pct": 0.0
+            },
+            "endpoints": []
+        }))
+        .unwrap();
+
+        assert_eq!(config.tenancy.tenants[0].keys[0].value, "inline-secret");
+        assert_eq!(
+            config.tenancy.tenants[0].keys[0].value_file,
+            Some(PathBuf::from("/tmp/acme.key"))
+        );
+        assert_eq!(
+            config.tenancy.tenants[0].keys[0].value_env.as_deref(),
+            Some("ACME_KEY")
+        );
+
+        let serialized = serde_json::to_value(&config).unwrap();
+        let key = &serialized["tenancy"]["tenants"][0]["keys"][0];
+
+        assert_eq!(key["source"], "header");
+        assert_eq!(key["name"], "x-api-key");
+        assert!(key.get("value").is_none());
+        assert!(key.get("value_file").is_none());
+        assert!(key.get("value_env").is_none());
     }
 }

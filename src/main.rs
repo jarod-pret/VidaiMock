@@ -17,12 +17,13 @@
  * VidaiMock: High-performance LLM API Mock Server.
  */
 
-use mimalloc::MiMalloc;
 use crate::config::AppConfig;
 use crate::server::start_server;
+use crate::tenancy::build_runtime_store;
+use metrics_exporter_prometheus::PrometheusBuilder;
+use mimalloc::MiMalloc;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
-use metrics_exporter_prometheus::PrometheusBuilder;
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
@@ -30,13 +31,11 @@ static GLOBAL: MiMalloc = MiMalloc;
 mod config;
 mod tenancy;
 // mod formats; // Removed
+mod aws_event_stream;
 mod handlers;
-mod replacer;
-mod server;
 mod provider;
-mod aws_event_stream; // Added for Bedrock streaming
-
-
+mod replacer;
+mod server; // Added for Bedrock streaming
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = AppConfig::load()?;
@@ -63,9 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => Level::INFO,
     };
 
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(log_level)
-        .finish();
+    let subscriber = FmtSubscriber::builder().with_max_level(log_level).finish();
 
     if let Err(e) = tracing::subscriber::set_global_default(subscriber) {
         eprintln!("ERROR: Failed to initialize logging: {}", e);
@@ -73,24 +70,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if config.log_level != "off" {
-        tracing::info!("VidaiMock Initialization (Workers: {}, Latency: {}ms, Mode: {})", 
-            workers, config.latency.base_ms, config.latency.mode);
+        tracing::info!(
+            "VidaiMock Initialization (Workers: {}, Latency: {}ms, Mode: {})",
+            workers,
+            config.latency.base_ms,
+            config.latency.mode
+        );
 
         // Diagnostic: List embedded assets
         for file in crate::provider::Asset::iter() {
             tracing::debug!("Embedded Asset: {}", file);
         }
-        
+
         let endpoints: Vec<String> = config.endpoints.iter().map(|e| e.path.clone()).collect();
         info!(endpoints = ?endpoints, "Registered Endpoints");
     }
 
-    let registry_dir = config.runtime_registry_dir()?;
-    let registry = crate::provider::init_registry(&registry_dir);
+    let tenants = build_runtime_store(&config)?;
 
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(workers as usize)
         .enable_all()
         .build()?
-        .block_on(start_server(config, handle, registry))
+        .block_on(start_server(config, handle, tenants))
 }

@@ -5,6 +5,7 @@ config_dir = "config" # Single mode schema root. In single mode, providers/ and 
 
 [tenancy]
 mode = "single" # "single" uses config/ and stays backward-compatible. "multi" uses tenants/
+# tenant_header = "x-tenant" # Optional explicit tenant header for multi mode requests.
 # tenants_dir = "tenants" # In multi mode, each tenant schema lives under tenants/<id>/
 # [[tenancy.tenants]]
 # id = "acme"
