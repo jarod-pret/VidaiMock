@@ -835,4 +835,186 @@ mod tests {
         let _: serde_json::Value = serde_json::from_str(&text)
             .expect("body must be valid JSON");
     }
+
+    // ─── VM-009: Agentic tool-loop termination (end-to-end) ──────────────
+    //
+    // These integration tests complement the unit tests in provider.rs by
+    // exercising the full HTTP->template->response path. They guarantee that
+    // the heuristic is wired into each provider's bundled chat template and
+    // that the emitted response actually changes shape when a tool result
+    // sits in the history.
+
+    /// VM-009 / OpenAI: with `tools` but a preceding `role:tool` message, the
+    /// response must be plain text with finish_reason=stop — NOT tool_calls.
+    #[tokio::test]
+    async fn test_vm009_openai_tool_loop_terminates_on_tool_result() {
+        let app = create_app(get_test_config(), None, get_embedded_registry()).await;
+        let body = r#"{
+            "model": "gpt-4o-mini",
+            "tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {}}}],
+            "messages": [
+                {"role": "user", "content": "What is the weather in London?"},
+                {"role": "assistant", "tool_calls": [
+                    {"id": "call_1", "type": "function",
+                     "function": {"name": "get_weather", "arguments": "{\"city\":\"London\"}"}}
+                ]},
+                {"role": "tool", "tool_call_id": "call_1", "content": "15°C cloudy"}
+            ]
+        }"#;
+        let resp = app.oneshot(
+            Request::builder().method("POST").uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(body)).unwrap()
+        ).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let text = String::from_utf8(drain_body(resp).await).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let choice = &json["choices"][0];
+        let msg = &choice["message"];
+
+        assert_eq!(choice["finish_reason"], "stop",
+            "finish_reason must be 'stop' after tool result, not 'tool_calls'; got:\n{}", text);
+        assert!(msg.get("tool_calls").is_none() || msg["tool_calls"].is_null(),
+            "response must NOT include tool_calls after a tool result; got:\n{}", text);
+        assert!(msg["content"].as_str().is_some(),
+            "response must include text content after a tool result; got:\n{}", text);
+    }
+
+    /// VM-009 / OpenAI (regression guard): with `tools` and NO tool result in
+    /// the history, the response must still be tool_calls. We must only
+    /// terminate when appropriate.
+    #[tokio::test]
+    async fn test_vm009_openai_tools_without_result_still_returns_tool_calls() {
+        let app = create_app(get_test_config(), None, get_embedded_registry()).await;
+        let body = r#"{
+            "model": "gpt-4o-mini",
+            "tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {}}}],
+            "messages": [{"role": "user", "content": "Weather?"}]
+        }"#;
+        let resp = app.oneshot(
+            Request::builder().method("POST").uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(body)).unwrap()
+        ).await.unwrap();
+        let text = String::from_utf8(drain_body(resp).await).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["choices"][0]["finish_reason"], "tool_calls");
+        assert!(json["choices"][0]["message"]["tool_calls"].is_array());
+    }
+
+    /// VM-009 / Anthropic: tool_result content block in user message
+    /// terminates the loop — stop_reason must be end_turn and content
+    /// must be text, not tool_use.
+    #[tokio::test]
+    async fn test_vm009_anthropic_tool_loop_terminates_on_tool_result() {
+        let app = create_app(get_test_config(), None, get_embedded_registry()).await;
+        let body = r#"{
+            "model": "claude",
+            "max_tokens": 200,
+            "tools": [{"name": "get_weather", "description": "x", "input_schema": {"type":"object"}}],
+            "messages": [
+                {"role": "user", "content": "Weather in London?"},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "t1", "name": "get_weather", "input": {"city": "London"}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "15°C cloudy"}
+                ]}
+            ]
+        }"#;
+        let resp = app.oneshot(
+            Request::builder().method("POST").uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(body)).unwrap()
+        ).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let text = String::from_utf8(drain_body(resp).await).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+
+        assert_eq!(json["stop_reason"], "end_turn",
+            "stop_reason must be 'end_turn' after tool_result, not 'tool_use'; got:\n{}", text);
+        let first_block_type = json["content"][0]["type"].as_str();
+        assert_eq!(first_block_type, Some("text"),
+            "first content block must be 'text' after tool_result, not 'tool_use'; got:\n{}", text);
+    }
+
+    /// VM-009 / Anthropic (regression guard): with `tools` but only the
+    /// initial user message, the response must still be a tool_use block.
+    #[tokio::test]
+    async fn test_vm009_anthropic_tools_without_result_still_returns_tool_use() {
+        let app = create_app(get_test_config(), None, get_embedded_registry()).await;
+        let body = r#"{
+            "model": "claude",
+            "max_tokens": 200,
+            "tools": [{"name": "get_weather", "description": "x", "input_schema": {"type":"object"}}],
+            "messages": [{"role": "user", "content": "Weather?"}]
+        }"#;
+        let resp = app.oneshot(
+            Request::builder().method("POST").uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(body)).unwrap()
+        ).await.unwrap();
+        let text = String::from_utf8(drain_body(resp).await).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["stop_reason"], "tool_use");
+        assert_eq!(json["content"][0]["type"], "tool_use");
+    }
+
+    /// VM-009 / Gemini: functionResponse part in user contents terminates
+    /// the loop — first part must be text, not functionCall. finishMessage
+    /// must NOT say "Model generated function call(s)."
+    #[tokio::test]
+    async fn test_vm009_gemini_tool_loop_terminates_on_function_response() {
+        let app = create_app(get_test_config(), None, get_embedded_registry()).await;
+        let body = r#"{
+            "contents": [
+                {"role": "user", "parts": [{"text": "Weather in London?"}]},
+                {"role": "model", "parts": [{"functionCall": {"name": "get_weather", "args": {"city":"London"}}}]},
+                {"role": "user", "parts": [{"functionResponse": {"name": "get_weather", "response": {"temp": 15}}}]}
+            ],
+            "tools": [{"functionDeclarations": [{"name": "get_weather", "parameters": {}}]}]
+        }"#;
+        let resp = app.oneshot(
+            Request::builder().method("POST")
+                .uri("/v1beta/models/gemini-2.5-flash:generateContent")
+                .header("content-type", "application/json")
+                .body(Body::from(body)).unwrap()
+        ).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let text = String::from_utf8(drain_body(resp).await).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let first_part = &json["candidates"][0]["content"]["parts"][0];
+
+        assert!(first_part.get("text").is_some(),
+            "first part must carry text after functionResponse; got:\n{}", text);
+        assert!(first_part.get("functionCall").is_none(),
+            "first part must NOT be functionCall after functionResponse; got:\n{}", text);
+        // finishMessage is only emitted on the function-call branch; absence here
+        // confirms the loop-terminating branch rendered.
+        assert!(json["candidates"][0].get("finishMessage").is_none(),
+            "finishMessage must be absent on the text-response branch; got:\n{}", text);
+    }
+
+    /// VM-009 / Gemini (regression guard): with tools and no functionResponse,
+    /// still returns functionCall.
+    #[tokio::test]
+    async fn test_vm009_gemini_tools_without_response_still_returns_function_call() {
+        let app = create_app(get_test_config(), None, get_embedded_registry()).await;
+        let body = r#"{
+            "contents": [{"role": "user", "parts": [{"text": "Weather?"}]}],
+            "tools": [{"functionDeclarations": [{"name": "get_weather", "parameters": {}}]}]
+        }"#;
+        let resp = app.oneshot(
+            Request::builder().method("POST")
+                .uri("/v1beta/models/gemini-2.5-flash:generateContent")
+                .header("content-type", "application/json")
+                .body(Body::from(body)).unwrap()
+        ).await.unwrap();
+        let text = String::from_utf8(drain_body(resp).await).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(json["candidates"][0]["content"]["parts"][0].get("functionCall").is_some());
+    }
 }

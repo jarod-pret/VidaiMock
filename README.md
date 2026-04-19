@@ -56,6 +56,7 @@ Plus: Tool calling (OpenAI `tool_calls` + Anthropic `tool_use` + Gemini `functio
 - **⚡ High Performance**: 50,000+ RPS in benchmark mode
 - **🎛️ Chaos & Error Testing**: Inject failures, latency, malformed responses, and **custom HTTP status codes** (400, 401, 404, 429, 500, etc.) — every error returns a **provider-shaped JSON envelope** (OpenAI, Anthropic, Gemini)
 - **🧠 Smart Response Branching**: Templates auto-detect tool calls (OpenAI `tool_calls`, Anthropic `tool_use`, Gemini `functionCall`), reasoning models (o-series), structured output, and respond with the correct shape
+- **🔁 Agentic Loop Termination**: When a tool result is already in the request history (OpenAI `role: tool`, Anthropic `tool_result` block, Gemini `functionResponse` part), the mock switches to plain-text synthesis instead of looping another `tool_call` — ADK/LangGraph/LangChain agentic runs terminate naturally
 - **🎯 Per-Request Overrides**: `X-Mock-Status` header, `?chaos_status=500` URL query, and `X-Vidai-Chaos-*` headers all return real provider error envelopes — test error paths on real provider routes without path rewriting
 - **✅ Request Validation**: Known-required fields are enforced per provider (e.g. Anthropic `/v1/messages` without `max_tokens` → HTTP 400 with correct `invalid_request_error` envelope and a per-field message like `max_tokens: Field required`)
 - **🔬 SDK-Level Wire Accuracy**: Streams survive strict SDK parsers end-to-end — `openai-python`, `anthropic`, `google-genai` all iterate the mock without hand-crafted compat shims. Regression-tested byte-level against captured real-provider wire format.
@@ -73,7 +74,7 @@ Unlike tools that just record and replay static data or intercept browser reques
 *   **Truly Dynamic**: Every response is a Tera template. You can reflect request data, generate random IDs, or use complex logic to make your mock feel alive.
 *   **Physics-Accurate**: Emulates real-world network protocols (SSE, EventStream) and silver-level latency.
 *   **Error Path Testing**: Custom HTTP status codes via `status_code` in YAML (static or dynamic) and `X-Mock-Status` request header let you test upstream error handling — 400s, 401s, 404s, 429s, 500s — on any real provider endpoint without path rewriting.
-*   **Smart Branching**: Templates auto-detect OpenAI `tools`/`response_format`/o-series models, Anthropic `tools`, and Gemini `functionDeclarations` from the request and return the correctly shaped response — no per-scenario config needed.
+*   **Smart Branching**: Templates auto-detect OpenAI `tools`/`response_format`/o-series models, Anthropic `tools`, Gemini `functionDeclarations`, and tool-result presence in the message history — so agentic testing against ADK, LangGraph, and LangChain Runner loops terminates correctly instead of calling the mock forever.
 *   **Typed SSE Streaming**: Beyond plain `data:` chunks — supports OpenAI Responses API typed events (`response.output_text.delta`, etc.), Anthropic's 7-event lifecycle (`content_block_start`, `message_delta`, `ping`, etc.), Gemini's "text-delta chunks + terminal `finishReason` chunk" pattern, and `stream_options.include_usage` for final usage chunks.
 
 ## 📂 Project Structure
@@ -222,6 +223,21 @@ curl -N http://localhost:8100/v1/messages \
   -H "Content-Type: application/json" \
   -d '{"model": "claude-haiku-4-5-20251001", "max_tokens": 200, "stream": true, "messages": [{"role": "user", "content": "Count to 5"}]}'
 
+# Agentic tool loop — send a tool result back and get plain-text synthesis
+# instead of another tool_calls. Lets ADK/LangGraph/LangChain Runner loops
+# terminate against the mock the same way they do against real providers.
+curl http://localhost:8100/v1/chat/completions \
+  -H "Content-Type: application/json" -d '{
+    "model": "gpt-4o",
+    "tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {}}}],
+    "messages": [
+      {"role": "user", "content": "Weather in London?"},
+      {"role": "assistant", "tool_calls": [{"id":"c1","type":"function","function":{"name":"get_weather","arguments":"{}"}}]},
+      {"role": "tool", "tool_call_id": "c1", "content": "15°C cloudy"}
+    ]
+  }'
+# -> {"choices":[{"message":{"content":"Based on the tool results, ...","tool_calls":null}, "finish_reason":"stop"}]}
+
 # With latency simulation
 ./vidaimock --latency 500 --mode realistic
 
@@ -326,6 +342,47 @@ the same `error_template` pipeline:
 
 All four route to the provider's `error_template`, so SDK clients see a
 parseable error envelope regardless of how the failure was injected.
+
+### Tera template helpers
+
+Response templates can call built-in functions to keep logic declarative:
+
+| Helper | Returns | Use case |
+|---|---|---|
+| `uuid()` | random UUID string | IDs (`chatcmpl-{{ uuid() }}`, `msg_{{ uuid() }}`) |
+| `timestamp()` | current unix seconds (int) | `created` / `created_at` fields |
+| `iso_timestamp()` | ISO-8601 string | Human-readable timestamps |
+| `random_int(min, max)` | integer | Mock token counts, call IDs |
+| `random_float(min, max)` | float | Embeddings, scores |
+| `has_tool_result(messages, provider)` | bool | Agentic loop termination — see below |
+
+**`has_tool_result(messages, provider)`** detects whether the request's
+conversation history already contains a tool result, so chat templates can
+switch from "emit another `tool_call`" to "emit plain-text synthesis" and
+agentic Runner loops (ADK, LangGraph, LangChain) terminate correctly.
+Provider-specific shapes recognised:
+
+| `provider` | Detection |
+|---|---|
+| `openai` | any message with `role == "tool"` |
+| `anthropic` | user message whose `content` array contains a block with `type == "tool_result"` |
+| `gemini` | user content whose `parts` array contains a `functionResponse` key |
+
+Default is `openai` when `provider` is omitted. Malformed/missing inputs
+return `false` rather than raising — safe to use unconditionally in
+`{% if %}` guards.
+
+Usage example in a custom OpenAI-compat template:
+
+```jinja2
+{% if json.tools and has_tool_result(messages=json.messages, provider="openai") %}
+  {# Plain-text synthesis branch #}
+{% elif json.tools %}
+  {# Tool call branch #}
+{% else %}
+  {# Default text branch #}
+{% endif %}
+```
 
 ## 📄 License
 

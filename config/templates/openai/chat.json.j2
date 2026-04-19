@@ -1,13 +1,45 @@
 {#
    OpenAI chat completion response template.
 
-   Switches response shape based on request fields:
-     - tools present  -> tool_calls response with finish_reason "tool_calls"
-     - response_format -> structured output (JSON string content)
-     - o-series model -> reasoning usage tokens (completion_tokens_details.reasoning_tokens)
-     - default        -> plain assistant text response
+   Switches response shape based on request fields (order matters):
+     - tools present + tool_result already in history -> plain text synthesis
+       (terminates agentic tool-calling loops; otherwise ADK/LangGraph
+       would call the mock forever)
+     - tools present                                 -> tool_calls response
+     - response_format                               -> structured output
+     - o-series model                                -> reasoning usage tokens
+     - default                                       -> plain assistant text
 #}
-{% if json.tools is defined and json.tools | length > 0 %}
+{% if json.tools is defined and json.tools | length > 0 and has_tool_result(messages=json.messages, provider="openai") %}
+{
+  "id": "chatcmpl-{{ uuid() }}",
+  "object": "chat.completion",
+  "created": {{ timestamp() }},
+  "model": "{{ model }}",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Based on the tool results, here is the answer.",
+        "refusal": null,
+        "annotations": []
+      },
+      "logprobs": null,
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 72,
+    "completion_tokens": 14,
+    "total_tokens": 86,
+    "prompt_tokens_details": { "cached_tokens": 0, "audio_tokens": 0 },
+    "completion_tokens_details": { "reasoning_tokens": 0, "audio_tokens": 0, "accepted_prediction_tokens": 0, "rejected_prediction_tokens": 0 }
+  },
+  "service_tier": "default",
+  "system_fingerprint": "fp_mock_vidai"
+}
+{% elif json.tools is defined and json.tools | length > 0 %}
 {
   "id": "chatcmpl-{{ uuid() }}",
   "object": "chat.completion",
