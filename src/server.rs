@@ -1017,4 +1017,224 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert!(json["candidates"][0]["content"]["parts"][0].get("functionCall").is_some());
     }
+
+    // ─── VM-010: Tool-call responses must echo the caller's tool name ──────
+    //
+    // Previously, the OpenAI chat template hardcoded "get_weather"/"Paris"
+    // regardless of what tool the caller declared. Anthropic and Gemini
+    // already echoed correctly; we lock that in as regression guards too.
+
+    /// VM-010 / OpenAI non-streaming: declared tool name must appear in response.
+    #[tokio::test]
+    async fn test_vm010_openai_echoes_caller_tool_name() {
+        let app = create_app(get_test_config(), None, get_embedded_registry()).await;
+        let body = r#"{
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "function": {"name": "canary_tool_a", "parameters": {}}}]
+        }"#;
+        let resp = app.oneshot(
+            Request::builder().method("POST").uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(body)).unwrap()
+        ).await.unwrap();
+        let json: serde_json::Value = serde_json::from_str(
+            &String::from_utf8(drain_body(resp).await).unwrap()
+        ).unwrap();
+        let tc = &json["choices"][0]["message"]["tool_calls"][0];
+        assert_eq!(tc["function"]["name"], "canary_tool_a",
+            "OpenAI response must echo caller's tool name; got: {}", tc);
+        assert_eq!(tc["function"]["arguments"], "{}",
+            "OpenAI args should default to empty object; got: {}", tc);
+    }
+
+    /// VM-010 / OpenAI streaming: same — the streaming tool_calls frame
+    /// must echo the caller's name, not hardcoded.
+    #[tokio::test]
+    async fn test_vm010_openai_streaming_echoes_caller_tool_name() {
+        let app = create_app(get_test_config(), None, get_embedded_registry()).await;
+        let body = r#"{
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": true,
+            "tools": [{"type": "function", "function": {"name": "canary_tool_s", "parameters": {}}}]
+        }"#;
+        let resp = app.oneshot(
+            Request::builder().method("POST").uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(body)).unwrap()
+        ).await.unwrap();
+        let text = String::from_utf8(drain_body(resp).await).unwrap();
+        // Find the tool_calls frame and assert it carries the caller's name.
+        assert!(text.contains("\"name\":\"canary_tool_s\""),
+            "OpenAI streaming tool_calls must echo caller's name; got:\n{}", text);
+        assert!(!text.contains("\"name\":\"get_weather\""),
+            "OpenAI streaming must not emit the hardcoded demo name; got:\n{}", text);
+    }
+
+    /// VM-010 / Anthropic non-streaming (regression guard).
+    #[tokio::test]
+    async fn test_vm010_anthropic_echoes_caller_tool_name() {
+        let app = create_app(get_test_config(), None, get_embedded_registry()).await;
+        let body = r#"{
+            "model": "claude", "max_tokens": 200,
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"name": "canary_tool_b", "description": "x", "input_schema": {"type": "object"}}]
+        }"#;
+        let resp = app.oneshot(
+            Request::builder().method("POST").uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(body)).unwrap()
+        ).await.unwrap();
+        let json: serde_json::Value = serde_json::from_str(
+            &String::from_utf8(drain_body(resp).await).unwrap()
+        ).unwrap();
+        assert_eq!(json["content"][0]["type"], "tool_use");
+        assert_eq!(json["content"][0]["name"], "canary_tool_b");
+    }
+
+    /// VM-010 / Gemini non-streaming (regression guard).
+    #[tokio::test]
+    async fn test_vm010_gemini_echoes_caller_tool_name() {
+        let app = create_app(get_test_config(), None, get_embedded_registry()).await;
+        let body = r#"{
+            "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+            "tools": [{"functionDeclarations": [{"name": "canary_tool_c", "parameters": {"type":"OBJECT"}}]}]
+        }"#;
+        let resp = app.oneshot(
+            Request::builder().method("POST")
+                .uri("/v1beta/models/gemini-2.5-flash:generateContent")
+                .header("content-type", "application/json")
+                .body(Body::from(body)).unwrap()
+        ).await.unwrap();
+        let json: serde_json::Value = serde_json::from_str(
+            &String::from_utf8(drain_body(resp).await).unwrap()
+        ).unwrap();
+        let fc = &json["candidates"][0]["content"]["parts"][0]["functionCall"];
+        assert_eq!(fc["name"], "canary_tool_c");
+    }
+
+    // ─── VM-011: Streaming-with-tools wire-format linter ───────────────────
+    //
+    // Every `data:` frame in a streaming SSE response must be a single line
+    // of valid JSON. Before the VM-011 fix, Gemini + Anthropic emitted
+    // pretty-printed multi-line JSON that bled outside the SSE framing
+    // (Gemini's SDK errored; Anthropic's silently mis-parsed). Locks in the
+    // single-line contract across all three providers.
+    //
+    // Reusable: easy to extend when new providers add streaming-with-tools.
+
+    /// Assert every `data: {...}` line in an SSE body is a single-line
+    /// JSON object that parses cleanly and contains no embedded newlines.
+    fn assert_data_frames_are_single_line_json(body: &str, label: &str) {
+        let mut frame_count = 0;
+        for line in body.lines() {
+            let Some(payload) = line.strip_prefix("data: ") else { continue };
+            if payload.is_empty() || payload == "[DONE]" {
+                // Empty data: is a malformed frame (the original Gemini bug).
+                panic!("{label}: empty 'data:' line found — indicates broken multi-line frame");
+            }
+            // Must parse as JSON.
+            serde_json::from_str::<serde_json::Value>(payload)
+                .unwrap_or_else(|e| panic!(
+                    "{label}: data frame must be valid JSON; parse error: {e}\nframe: {payload}\nfull body:\n{body}"
+                ));
+            // Must contain no embedded newlines (single-line per SSE spec).
+            assert!(!payload.contains('\n'),
+                "{label}: data frame must be single-line; got embedded \\n in:\n{payload}");
+            frame_count += 1;
+        }
+        assert!(frame_count >= 1,
+            "{label}: expected at least one data: frame; got 0. body:\n{body}");
+    }
+
+    /// VM-011 / Gemini: streaming with tools must not emit multi-line JSON.
+    #[tokio::test]
+    async fn test_vm011_gemini_streaming_with_tools_single_line_frames() {
+        let app = create_app(get_test_config(), None, get_embedded_registry()).await;
+        let body = r#"{
+            "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+            "tools": [{"functionDeclarations": [{"name": "canary_t", "parameters": {"type":"OBJECT"}}]}]
+        }"#;
+        let resp = app.oneshot(
+            Request::builder().method("POST")
+                .uri("/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse")
+                .header("content-type", "application/json")
+                .body(Body::from(body)).unwrap()
+        ).await.unwrap();
+        let text = String::from_utf8(drain_body(resp).await).unwrap();
+        assert_data_frames_are_single_line_json(&text, "gemini stream+tools");
+
+        // Also assert the functionCall echoes the caller's name (combined
+        // VM-010 + VM-011 check for the streaming path).
+        assert!(text.contains("\"name\":\"canary_t\""),
+            "Gemini streaming tool_call must echo caller's name; got:\n{}", text);
+    }
+
+    /// VM-011 / Anthropic: streaming with tools must emit typed tool_use
+    /// events, not word-chunked JSON text deltas. Before the fix, the stream
+    /// parsed as "content_block_delta with text_delta" containing fragments
+    /// of the tool_use JSON body.
+    #[tokio::test]
+    async fn test_vm011_anthropic_streaming_with_tools_emits_tool_use_block() {
+        let app = create_app(get_test_config(), None, get_embedded_registry()).await;
+        let body = r#"{
+            "model": "claude", "max_tokens": 50, "stream": true,
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"name": "canary_t", "description": "x", "input_schema": {"type": "object"}}]
+        }"#;
+        let resp = app.oneshot(
+            Request::builder().method("POST").uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(body)).unwrap()
+        ).await.unwrap();
+        let text = String::from_utf8(drain_body(resp).await).unwrap();
+
+        // content_block_start's content_block must be tool_use, not text.
+        assert!(
+            text.contains("\"type\":\"tool_use\""),
+            "Anthropic streaming with tools must emit tool_use content block; got:\n{}", text
+        );
+        assert!(
+            text.contains("\"name\":\"canary_t\""),
+            "tool_use block must echo caller's name; got:\n{}", text
+        );
+        // Deltas must be input_json_delta, not text_delta fragments of JSON body.
+        assert!(
+            text.contains("\"type\":\"input_json_delta\""),
+            "Anthropic streaming tool deltas must be input_json_delta; got:\n{}", text
+        );
+        // stop_reason in message_delta must be tool_use.
+        assert!(
+            text.contains("\"stop_reason\":\"tool_use\""),
+            "message_delta must carry stop_reason=tool_use; got:\n{}", text
+        );
+    }
+
+    /// VM-011 / OpenAI (regression guard): streaming-with-tools single-line
+    /// framing was already correct before the VM-011 fix; assert it stays that
+    /// way after the shared content extractor changes.
+    #[tokio::test]
+    async fn test_vm011_openai_streaming_with_tools_single_line_frames() {
+        let app = create_app(get_test_config(), None, get_embedded_registry()).await;
+        let body = r#"{
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": true,
+            "tools": [{"type": "function", "function": {"name": "canary_t", "parameters": {}}}]
+        }"#;
+        let resp = app.oneshot(
+            Request::builder().method("POST").uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(body)).unwrap()
+        ).await.unwrap();
+        let text = String::from_utf8(drain_body(resp).await).unwrap();
+        // OpenAI's stream uses "data: ..." + "data: [DONE]". Skip the [DONE]
+        // sentinel which is a valid OpenAI convention but not valid JSON.
+        let body_without_done: String = text.lines()
+            .filter(|l| *l != "data: [DONE]")
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_data_frames_are_single_line_json(&body_without_done, "openai stream+tools");
+    }
 }

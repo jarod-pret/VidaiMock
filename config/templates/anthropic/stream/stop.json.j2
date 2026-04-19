@@ -1,9 +1,21 @@
-{# Anthropic stream: closing events (content_block_stop + message_delta + message_stop) #}
+{#- Anthropic stream: closing events (content_block_stop + message_delta + message_stop).
+
+    message_delta's stop_reason is:
+      - "tool_use" when a tool was called (tools present AND no prior tool_result)
+      - "end_turn" otherwise
+
+    We detect tool-mode via request body rather than chunk type because the
+    chunk context isn't available at on_stop.
+-#}
 event: content_block_stop
 data: {"type":"content_block_stop","index":0}
 
 event: message_delta
+{% if json.tools and not has_tool_result(messages=json.messages, provider="anthropic") -%}
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null,"stop_details":null},"usage":{"input_tokens":16,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":13}}
+{%- else -%}
 data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null,"stop_details":null},"usage":{"input_tokens":16,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":13}}
+{%- endif %}
 
 event: message_stop
 data: {"type":"message_stop"}

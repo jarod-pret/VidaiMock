@@ -59,7 +59,7 @@ Plus: Tool calling (OpenAI `tool_calls` + Anthropic `tool_use` + Gemini `functio
 - **🔁 Agentic Loop Termination**: When a tool result is already in the request history (OpenAI `role: tool`, Anthropic `tool_result` block, Gemini `functionResponse` part), the mock switches to plain-text synthesis instead of looping another `tool_call` — ADK/LangGraph/LangChain agentic runs terminate naturally
 - **🎯 Per-Request Overrides**: `X-Mock-Status` header, `?chaos_status=500` URL query, and `X-Vidai-Chaos-*` headers all return real provider error envelopes — test error paths on real provider routes without path rewriting
 - **✅ Request Validation**: Known-required fields are enforced per provider (e.g. Anthropic `/v1/messages` without `max_tokens` → HTTP 400 with correct `invalid_request_error` envelope and a per-field message like `max_tokens: Field required`)
-- **🔬 SDK-Level Wire Accuracy**: Streams survive strict SDK parsers end-to-end — `openai-python`, `anthropic`, `google-genai` all iterate the mock without hand-crafted compat shims. Regression-tested byte-level against captured real-provider wire format.
+- **🔬 SDK-Level Wire Accuracy**: Streams survive strict SDK parsers end-to-end — `openai-python`, `anthropic`, `google-genai` all iterate the mock without hand-crafted compat shims. Text streaming, tool-call streaming, and agentic-loop streaming all emit single-line SSE JSON with correct typed events. Regression-tested byte-level against captured real-provider wire format.
 - **📝 Customizable**: YAML configs + Tera templates for any API
 
 ## 🛡️ Built for Vidai.Server
@@ -366,6 +366,26 @@ essential for providers like OpenAI's Responses API that use typed `event:`
 lines. The renderer preserves blank lines as frame separators so templates
 can emit multi-event sequences (e.g. terminal `finish_reason` chunk → usage
 chunk → `[DONE]`) without framing drift.
+
+### Overriding bundled providers and templates
+
+The bundled providers (`config/providers/*.yaml`) and templates
+(`config/templates/**/*.j2`) are embedded into the binary as sensible
+defaults. Anything in `--config-dir` overrides them by filename — disk
+beats embedded.
+
+- To change how `/v1/chat/completions` responds, drop a
+  `providers/openai.yaml` into your config dir. VidaiMock loads yours
+  instead of the bundled one.
+- To change a template while keeping the provider config, drop a same-path
+  `templates/openai/chat.json.j2` into your config dir. Templates are
+  overridable independently of provider configs.
+- To add a new endpoint, drop any YAML into `providers/` with a unique
+  `matcher`. Higher-`priority` providers match before lower-priority ones.
+
+No restart-tricks, no forking, no git submodules — the overlay is the
+upgrade path. Bundled defaults can change between versions without
+disrupting your customisations.
 
 ### Chaos & error injection modes
 

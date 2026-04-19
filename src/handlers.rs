@@ -720,20 +720,34 @@ fn extract_content_value(json_str: &str) -> (serde_json::Value, bool) {
                 }
             }
         }
-        // Anthropic format: content[0].text
+        // Anthropic format: content[0].text OR content[0].type == "tool_use".
+        // A tool_use-first content block is the Anthropic analogue of OpenAI
+        // tool_calls — emit as a single structured chunk so the streaming
+        // template can render it as a typed content_block_start/delta rather
+        // than word-chunking the entire JSON body as text.
         if let Some(content) = json.get("content").and_then(|c| c.as_array()) {
             if let Some(first_block) = content.get(0) {
+                if first_block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
+                    return (first_block.clone(), true);
+                }
                 if let Some(text) = first_block.get("text") {
                     return (text.clone(), false);
                 }
             }
         }
-        // Gemini/Vertex format: candidates[0].content.parts[0].text
+        // Gemini/Vertex format: candidates[0].content.parts[0] is either
+        // `{text: ...}` (text response) or `{functionCall: ...}` (tool call).
+        // functionCall goes down the same "single structured chunk" path as
+        // OpenAI tool_calls / Anthropic tool_use so streaming doesn't try to
+        // word-chunk the JSON body.
         if let Some(candidates) = json.get("candidates").and_then(|c| c.as_array()) {
             if let Some(first_candidate) = candidates.get(0) {
                 if let Some(content) = first_candidate.get("content") {
                     if let Some(parts) = content.get("parts").and_then(|p| p.as_array()) {
                         if let Some(first_part) = parts.get(0) {
+                            if first_part.get("functionCall").is_some() {
+                                return (first_part.clone(), true);
+                            }
                             if let Some(text) = first_part.get("text") {
                                 return (text.clone(), false);
                             }
@@ -744,7 +758,7 @@ fn extract_content_value(json_str: &str) -> (serde_json::Value, bool) {
         }
     }
     // Fallback: raw string
-    (serde_json::Value::String(json_str.to_string()), false) 
+    (serde_json::Value::String(json_str.to_string()), false)
 }
 
 

@@ -6,14 +6,22 @@
       - `modelVersion` and `responseId` ARE present on every chunk so clients can
         correlate; the response id stays stable across chunks within one stream.
 
-    The content text is drawn from the per-chunk `chunk` context variable the
-    streaming engine injects. -#}
+    Two chunk shapes are possible — the streaming engine decides which:
+      - string chunk (from text-response chunking): emit as a text delta
+      - structured chunk (functionCall from a tool-call response): emit as
+        a single part carrying the functionCall. Real Gemini emits the full
+        functionCall in a single streaming frame, not as text fragments.
+-#}
 {
   "candidates": [
     {
       "content": {
         "parts": [
+          {% if chunk is string %}
           {"text": "{{ chunk }}"}
+          {% else %}
+          {{ chunk | json_encode() }}
+          {% endif %}
         ],
         "role": "model"
       },

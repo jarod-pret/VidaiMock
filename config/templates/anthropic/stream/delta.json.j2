@@ -1,3 +1,19 @@
-{# Anthropic stream: per-chunk text delta #}
+{#- Anthropic stream: per-chunk delta.
+
+    Two delta shapes, chosen from the request (consistent with start/stop
+    detection — avoids relying on Tera's `chunk is string` behaviour which
+    is unreliable for structured JSON values):
+      - text response  -> delta: {type: "text_delta", text: "..."}
+      - tool_use      -> delta: {type: "input_json_delta", partial_json: "{}"}
+
+    Real Anthropic streams tool args as fragmented input_json_delta events;
+    for mock purposes we emit a single `{}` delta which any accumulator
+    reads as an empty-but-valid argument object.
+-#}
+{%- set is_tool_mode = json.tools and not has_tool_result(messages=json.messages, provider="anthropic") -%}
 event: content_block_delta
+{% if is_tool_mode -%}
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}
+{%- else -%}
 data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"{{ chunk }}"}}
+{%- endif %}

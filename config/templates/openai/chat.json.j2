@@ -56,8 +56,8 @@
             "id": "call_mock_{{ random_int(min=1000, max=9999) }}",
             "type": "function",
             "function": {
-              "name": "get_weather",
-              "arguments": "{\"city\":\"Paris\"}"
+              "name": "{{ json.tools.0.function.name | default(value='mock_tool') }}",
+              "arguments": "{}"
             }
           }
         ],
