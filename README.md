@@ -232,6 +232,8 @@ Normal tenant request keys stay on the mock traffic path only. Tenant self-manag
 
 By default the tenant-admin header is `x-tenant-admin-key`, and it can be overridden per tenant if needed.
 
+Tenant-admin credentials must be unique across tenants for each effective header+secret pair. Reusing the same secret under different tenant-admin headers is treated as a different identity, but sharing the same header+secret across tenants is rejected during validation and reload.
+
 Tenant self-management is scoped to the tenant resolved from tenant-admin auth. An optional tenant header may confirm that identity, but it cannot retarget management to another tenant.
 
 In single mode there is no tenant-local management auth surface, so `/tenant/*` stays closed unless global admin auth is intentionally configured and supplied for default-tenant inspection/reload.

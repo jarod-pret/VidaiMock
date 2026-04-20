@@ -208,6 +208,10 @@ impl TenancyConfig {
         if self.mode == TenancyMode::Multi {
             let discovered = self.load_multi_mode_tenants()?;
             self.validate_lookup_uniqueness(&discovered.named_tenants)?;
+            self.validate_management_auth_uniqueness(
+                discovered.default_tenant.as_ref(),
+                &discovered.named_tenants,
+            )?;
         }
         Ok(())
     }
@@ -499,6 +503,24 @@ impl TenancyConfig {
         Ok(())
     }
 
+    fn validate_management_auth_uniqueness(
+        &self,
+        default_tenant: Option<&TenantConfig>,
+        named_tenants: &[TenantConfig],
+    ) -> Result<(), String> {
+        let mut seen_identities: HashMap<ManagementAuthIdentity, String> = HashMap::new();
+
+        if let Some(default_tenant) = default_tenant {
+            register_management_auth_identity(&mut seen_identities, default_tenant)?;
+        }
+
+        for tenant in named_tenants {
+            register_management_auth_identity(&mut seen_identities, tenant)?;
+        }
+
+        Ok(())
+    }
+
     fn validate_supported_key_sources(&self, tenant: &TenantConfig) -> Result<(), String> {
         let tenant_header = self.normalized_tenant_header();
         for key in &tenant.keys {
@@ -706,6 +728,12 @@ pub struct ResolvedTenantManagementAuth {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ManagementAuthIdentity {
+    header: String,
+    secret: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct NormalizedLookupKey {
     source: TenantKeySource,
     name: String,
@@ -733,6 +761,30 @@ fn register_lookup(
     }
 
     seen.insert(normalized, tenant.id.clone());
+    Ok(())
+}
+
+fn register_management_auth_identity(
+    seen: &mut HashMap<ManagementAuthIdentity, String>,
+    tenant: &TenantConfig,
+) -> Result<(), String> {
+    let Some(management_auth) = tenant.resolved_management_auth()? else {
+        return Ok(());
+    };
+
+    let identity = ManagementAuthIdentity {
+        header: management_auth.header.clone(),
+        secret: management_auth.secret,
+    };
+
+    if let Some(existing_tenant_id) = seen.get(&identity) {
+        return Err(format!(
+            "duplicate tenant management_auth identity between '{}' and '{}' on header '{}'; tenant-admin credentials must be unique per header+secret combination",
+            existing_tenant_id, tenant.id, management_auth.header
+        ));
+    }
+
+    seen.insert(identity, tenant.id.clone());
     Ok(())
 }
 
@@ -1034,6 +1086,83 @@ value = "acme"
 
             fs::remove_dir_all(temp_base).unwrap();
         }
+    }
+
+    #[test]
+    fn duplicate_tenant_management_auth_identities_are_rejected() {
+        let temp_base = unique_test_dir("duplicate_tenant_management_auth");
+        write_tenant_metadata(
+            &temp_base,
+            "acme",
+            r#"
+id = "acme"
+
+[management_auth]
+header = "x-tenant-admin-key"
+value = "shared-admin"
+"#,
+        );
+        write_tenant_metadata(
+            &temp_base,
+            "globex",
+            r#"
+id = "globex"
+
+[management_auth]
+header = "x-tenant-admin-key"
+value = "shared-admin"
+"#,
+        );
+
+        let tenancy = TenancyConfig {
+            mode: TenancyMode::Multi,
+            tenants_dir: temp_base.join("tenants"),
+            tenant_header: default_tenant_header(),
+            admin_auth: AdminAuthConfig::default(),
+        };
+
+        let error = tenancy.validate().unwrap_err();
+        assert!(error.contains("duplicate tenant management_auth identity"));
+
+        fs::remove_dir_all(temp_base).unwrap();
+    }
+
+    #[test]
+    fn same_management_secret_under_different_headers_is_allowed() {
+        let temp_base = unique_test_dir("same_management_secret_different_headers");
+        write_tenant_metadata(
+            &temp_base,
+            "acme",
+            r#"
+id = "acme"
+
+[management_auth]
+header = "x-tenant-admin-key"
+value = "shared-admin"
+"#,
+        );
+        write_tenant_metadata(
+            &temp_base,
+            "globex",
+            r#"
+id = "globex"
+
+[management_auth]
+header = "x-globex-admin-key"
+value = "shared-admin"
+"#,
+        );
+
+        let tenancy = TenancyConfig {
+            mode: TenancyMode::Multi,
+            tenants_dir: temp_base.join("tenants"),
+            tenant_header: default_tenant_header(),
+            admin_auth: AdminAuthConfig::default(),
+        };
+
+        tenancy.validate().unwrap();
+
+        fs::remove_dir_all(temp_base).unwrap();
     }
 
     #[test]

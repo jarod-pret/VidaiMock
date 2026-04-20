@@ -322,7 +322,10 @@ fn reload_multi_mode_tenant(
     let mut tenants_by_id = current.tenants_by_id.clone();
     let default_tenant = if tenant_id == DEFAULT_TENANT_ID {
         let default_tenant_config = tenancy.load_default_tenant()?;
-        build_multi_mode_default_runtime_from_tenancy(&config, default_tenant_config.as_ref())?
+        let runtime =
+            build_multi_mode_default_runtime_from_tenancy(&config, default_tenant_config.as_ref())?;
+        validate_management_auth_uniqueness_for_reload(current, tenant_id, &runtime)?;
+        runtime
     } else {
         current.default_tenant()
     };
@@ -332,6 +335,7 @@ fn reload_multi_mode_tenant(
     if tenant_id != DEFAULT_TENANT_ID {
         let tenant_config = tenancy.load_named_tenant(tenant_id)?;
         let runtime = build_named_tenant_runtime(&config, tenancy, &tenant_config, &tenant_header)?;
+        validate_management_auth_uniqueness_for_reload(current, tenant_id, &runtime)?;
 
         validate_and_refresh_tenant_lookup_entries(
             &tenant_config,
@@ -485,6 +489,65 @@ fn resolve_tenant_management_auth(
         .resolved_management_auth()?
         .map(|management_auth| (management_auth.header, Some(management_auth.secret)))
         .unwrap_or_else(|| ("x-tenant-admin-key".to_string(), None)))
+}
+
+fn validate_management_auth_uniqueness_for_reload(
+    current: &Arc<TenantStore>,
+    reloaded_tenant_id: &str,
+    reloaded_runtime: &Arc<TenantRuntime>,
+) -> Result<(), Box<dyn Error>> {
+    // Tenant reload stays local: compare the reloaded tenant-admin identity
+    // against the current live store instead of re-reading unrelated tenants.
+    let Some(reloaded_secret) = reloaded_runtime.management_auth_secret.as_deref() else {
+        return Ok(());
+    };
+
+    if current.default_tenant.label != reloaded_tenant_id {
+        validate_runtime_management_auth_identity(
+            reloaded_tenant_id,
+            reloaded_runtime.management_auth_header.as_str(),
+            reloaded_secret,
+            current.default_tenant.as_ref(),
+        )?;
+    }
+
+    for existing_runtime in current.tenants_by_id.values() {
+        if existing_runtime.label == reloaded_tenant_id {
+            continue;
+        }
+
+        validate_runtime_management_auth_identity(
+            reloaded_tenant_id,
+            reloaded_runtime.management_auth_header.as_str(),
+            reloaded_secret,
+            existing_runtime.as_ref(),
+        )?;
+    }
+
+    Ok(())
+}
+
+fn validate_runtime_management_auth_identity(
+    reloaded_tenant_id: &str,
+    reloaded_header: &str,
+    reloaded_secret: &str,
+    existing_runtime: &TenantRuntime,
+) -> Result<(), Box<dyn Error>> {
+    let Some(existing_secret) = existing_runtime.management_auth_secret.as_deref() else {
+        return Ok(());
+    };
+
+    if existing_runtime.management_auth_header == reloaded_header
+        && existing_secret == reloaded_secret
+    {
+        return Err(format!(
+            "duplicate tenant management_auth identity between '{}' and '{}' on header '{}'; tenant-admin credentials must be unique per header+secret combination",
+            existing_runtime.label, reloaded_tenant_id, reloaded_header
+        )
+        .into());
+    }
+
+    Ok(())
 }
 
 fn register_header_lookups(

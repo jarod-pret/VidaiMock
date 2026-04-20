@@ -18,7 +18,7 @@ mode = "single" # "single" uses config/ and stays backward-compatible. "multi" u
 # value_file = "secrets/acme.key" # Normal mock traffic request key.
 # [management_auth]
 # header = "x-tenant-admin-key" # Optional tenant self-management auth for /tenant/*.
-# value_file = "secrets/acme-admin.key" # Separate from normal request keys. value_file > value_env > value.
+# value_file = "secrets/acme-admin.key" # Separate from normal request keys. value_file > value_env > value, and each tenant-admin header+secret pair must be unique across tenants.
 
 # Latency Simulation Configuration
 [latency]

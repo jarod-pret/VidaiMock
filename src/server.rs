@@ -2688,6 +2688,100 @@ value = "global-admin-secret"
     }
 
     #[tokio::test]
+    async fn test_tenant_reload_management_auth_conflict_keeps_previous_runtime_and_admin_auth() {
+        let temp_base = management_test_base("test_tenant_reload_management_auth_conflict");
+        write_provider(
+            &temp_base.join("tenants/default/providers/openai.yaml"),
+            r#"{"tenant":"default"}"#,
+        );
+        write_provider(
+            &temp_base.join("tenants/acme/providers/openai.yaml"),
+            r#"{"tenant":"acme-before"}"#,
+        );
+        write_provider(
+            &temp_base.join("tenants/globex/providers/openai.yaml"),
+            r#"{"tenant":"globex"}"#,
+        );
+
+        let config = managed_multi_tenant_config(&temp_base);
+        let app = create_app(
+            config.clone(),
+            None,
+            Arc::new(TenantStoreHandle::new(
+                build_runtime_store(&config).unwrap(),
+            )),
+        )
+        .await;
+
+        write_provider(
+            &temp_base.join("tenants/acme/providers/openai.yaml"),
+            r#"{"tenant":"acme-after"}"#,
+        );
+        write_tenant_metadata(
+            &temp_base,
+            "acme",
+            r#"
+id = "acme"
+
+[[keys]]
+source = "header"
+name = "x-api-key"
+value = "secret-acme"
+
+[management_auth]
+header = "x-tenant-admin-key"
+value = "tenant-admin-globex"
+"#,
+        );
+
+        let reload = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/tenant/reload")
+                    .header("x-tenant-admin-key", "tenant-admin-acme")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reload.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let inspect = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/tenant")
+                    .header("x-tenant-admin-key", "tenant-admin-acme")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(inspect.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_str(&response_text(inspect).await).unwrap();
+        assert_eq!(body["id"], "acme");
+
+        let acme_response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("x-api-key", "secret-acme")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(acme_response.status(), StatusCode::OK);
+        assert!(response_text(acme_response).await.contains("acme-before"));
+
+        fs::remove_dir_all(temp_base).unwrap();
+    }
+
+    #[tokio::test]
     async fn test_tenant_reload_succeeds_when_other_tenant_secret_source_is_broken() {
         let temp_base = management_test_base("test_tenant_reload_ignores_other_tenant_secret");
         write_provider(
