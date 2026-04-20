@@ -19,8 +19,6 @@
 
 use serde::Serialize;
 
-use crate::config::AppConfig;
-
 use super::{TenancyMode, TenantStore, DEFAULT_TENANT_ID};
 
 #[derive(Debug, Serialize, Clone, PartialEq, Eq)]
@@ -42,32 +40,32 @@ pub struct ReloadView {
     pub reloaded: Vec<String>,
 }
 
-pub fn list_tenants(config: &AppConfig, store: &TenantStore) -> TenantListView {
+pub fn list_tenants(store: &TenantStore) -> TenantListView {
     let mut tenants = vec![tenant_view_from_runtime(
         DEFAULT_TENANT_ID,
         store.default_tenant(),
         true,
     )];
 
-    if config.tenancy.mode == TenancyMode::Multi {
+    if store.mode == TenancyMode::Multi {
+        let mut tenant_ids: Vec<&String> = store.tenants_by_id.keys().collect();
+        tenant_ids.sort();
         tenants.extend(
-            config
-                .tenancy
-                .tenants
-                .iter()
-                .filter_map(|tenant| store.tenant_by_id(&tenant.id))
+            tenant_ids
+                .into_iter()
+                .filter_map(|tenant_id| store.tenant_by_id(tenant_id))
                 .map(|runtime| tenant_view_from_runtime(&runtime.label, runtime.clone(), false)),
         );
     }
 
     TenantListView {
-        mode: config.tenancy.mode.clone(),
+        mode: store.mode.clone(),
         tenants,
     }
 }
 
-pub fn tenant_view(config: &AppConfig, store: &TenantStore, tenant_id: &str) -> Option<TenantView> {
-    if config.tenancy.mode == TenancyMode::Single {
+pub fn tenant_view(store: &TenantStore, tenant_id: &str) -> Option<TenantView> {
+    if store.mode == TenancyMode::Single {
         return (tenant_id == DEFAULT_TENANT_ID)
             .then(|| tenant_view_from_runtime(DEFAULT_TENANT_ID, store.default_tenant(), true));
     }

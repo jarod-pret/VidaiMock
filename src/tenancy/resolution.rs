@@ -330,6 +330,10 @@ mod tests {
 
         TenantStore::new(
             TenancyMode::Multi,
+            PathBuf::from("config"),
+            tenancy.clone(),
+            tenancy.admin_auth.header.clone(),
+            None,
             tenancy.normalized_tenant_header(),
             default_runtime,
             tenants_by_id,

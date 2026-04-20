@@ -42,6 +42,8 @@ pub struct AppConfig {
     pub endpoints: Vec<EndpointConfig>,
     #[serde(skip)]
     pub response_file: Option<PathBuf>,
+    #[serde(skip)]
+    pub reload_args: Option<Cli>,
 }
 
 fn default_host() -> String {
@@ -72,7 +74,7 @@ pub struct EndpointConfig {
     pub content_type: Option<String>,
 }
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
 pub struct Cli {
     /// Host address to bind to (default: 0.0.0.0, use 127.0.0.1 for localhost only)
@@ -127,6 +129,7 @@ impl AppConfig {
     }
 
     pub fn build_config(args: Cli) -> Result<Self, config::ConfigError> {
+        let reload_args = args.clone();
         let mut settings = Config::builder()
             // Start with defaults
             .set_default("port", 8100_i64)?
@@ -208,8 +211,19 @@ impl AppConfig {
         }
 
         config.validate()?;
+        config.reload_args = Some(reload_args);
 
         Ok(config)
+    }
+
+    pub fn reload_from_source(&self) -> Result<Self, config::ConfigError> {
+        let Some(args) = self.reload_args.clone() else {
+            return Err(config::ConfigError::Message(
+                "config reload source is unavailable; restart required".to_string(),
+            ));
+        };
+
+        Self::build_config(args)
     }
 
     pub fn validate(&self) -> Result<(), config::ConfigError> {

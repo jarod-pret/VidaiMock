@@ -209,8 +209,7 @@ fn resolve_tenant_admin_or_reject(
     query_params: &HashMap<String, String>,
 ) -> Result<TenantResolution, Response> {
     let store = state.tenants.current();
-    if state.config.tenancy.mode == TenancyMode::Multi
-        && !store.has_explicit_tenant_signal(headers, query_params)
+    if store.mode == TenancyMode::Multi && !store.has_explicit_tenant_signal(headers, query_params)
     {
         return Err((StatusCode::UNAUTHORIZED, "Tenant admin auth required.").into_response());
     }
@@ -221,22 +220,14 @@ fn resolve_tenant_admin_or_reject(
 }
 
 fn authorize_admin_or_reject(state: &Arc<AppState>, headers: &HeaderMap) -> Result<(), Response> {
-    let admin_auth = &state.config.tenancy.admin_auth;
-    let Some(expected_secret) = admin_auth.resolved_value().map_err(|error| {
-        tracing::error!("Failed to resolve admin auth config: {}", error);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Admin auth configuration error.",
-        )
-            .into_response()
-    })?
-    else {
+    let store = state.tenants.current();
+    let Some(expected_secret) = store.admin_auth_secret.as_deref() else {
         tracing::warn!("Admin endpoint access denied because admin auth is not configured");
         return Err((StatusCode::UNAUTHORIZED, "Admin authentication required.").into_response());
     };
 
     let Some(provided) = headers
-        .get(admin_auth.header.as_str())
+        .get(store.admin_auth_header.as_str())
         .and_then(|value| value.to_str().ok())
     else {
         return Err((StatusCode::UNAUTHORIZED, "Admin authentication required.").into_response());
@@ -244,7 +235,9 @@ fn authorize_admin_or_reject(state: &Arc<AppState>, headers: &HeaderMap) -> Resu
 
     let provided = provided.trim();
     let header_matches = provided == expected_secret
-        || (admin_auth.header.eq_ignore_ascii_case("authorization")
+        || (store
+            .admin_auth_header
+            .eq_ignore_ascii_case("authorization")
             && provided
                 .strip_prefix("Bearer ")
                 .or_else(|| provided.strip_prefix("bearer "))
@@ -275,7 +268,7 @@ pub async fn admin_tenants_handler(
     }
 
     let store = state.tenants.current();
-    Json(list_tenants(&state.config, &store)).into_response()
+    Json(list_tenants(&store)).into_response()
 }
 
 pub async fn admin_tenant_handler(
@@ -288,7 +281,7 @@ pub async fn admin_tenant_handler(
     }
 
     let store = state.tenants.current();
-    let Some(view) = tenant_view(&state.config, &store, &tenant_id) else {
+    let Some(view) = tenant_view(&store, &tenant_id) else {
         return (StatusCode::NOT_FOUND, "Unknown tenant.").into_response();
     };
 
@@ -303,12 +296,19 @@ pub async fn admin_reload_handler(
         return response;
     }
 
-    let store = match state.tenants.reload_all(&state.config) {
+    // Reload re-reads the startup config source and rebuilds the live tenancy/admin/runtime state.
+    // It does not rebuild the listener, router, or the serialized startup AppConfig returned by /status.
+    let reloaded_config = match state.config.reload_from_source() {
+        Ok(config) => config,
+        Err(error) => return internal_error_response("Reload failed", error),
+    };
+
+    let store = match state.tenants.reload_all(&reloaded_config) {
         Ok(store) => store,
         Err(error) => return internal_error_response("Reload failed", error),
     };
 
-    let reloaded = list_tenants(&state.config, &store)
+    let reloaded = list_tenants(&store)
         .tenants
         .into_iter()
         .map(|tenant| tenant.id)
@@ -328,7 +328,7 @@ pub async fn tenant_handler(
     };
 
     let store = state.tenants.current();
-    let Some(view) = tenant_view(&state.config, &store, &resolution.tenant.label) else {
+    let Some(view) = tenant_view(&store, &resolution.tenant.label) else {
         return internal_error_response(
             "Tenant inspection failed",
             format!("missing runtime for tenant '{}'", resolution.tenant.label),
@@ -348,10 +348,7 @@ pub async fn tenant_reload_handler(
         Err(response) => return response,
     };
 
-    if let Err(error) = state
-        .tenants
-        .reload_tenant(&state.config, &resolution.tenant.label)
-    {
+    if let Err(error) = state.tenants.reload_tenant(&resolution.tenant.label) {
         return internal_error_response("Reload failed", error);
     }
 

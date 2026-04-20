@@ -19,12 +19,15 @@
 
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use crate::config::AppConfig;
 use crate::provider::{build_registry_from_layers, ProviderRegistry};
 
-use super::config::{TenancyConfig, TenancyMode, TenantConfig, TenantKeySource, DEFAULT_TENANT_ID};
+use super::config::{
+    AdminAuthConfig, TenancyConfig, TenancyMode, TenantConfig, TenantKeySource, DEFAULT_TENANT_ID,
+};
 use super::resolution::ResolvedRequestKey;
 
 pub struct TenantRuntime {
@@ -35,6 +38,10 @@ pub struct TenantRuntime {
 
 pub struct TenantStore {
     pub(crate) mode: TenancyMode,
+    pub(crate) config_dir: PathBuf,
+    pub(crate) tenancy: TenancyConfig,
+    pub(crate) admin_auth_header: String,
+    pub(crate) admin_auth_secret: Option<String>,
     pub(crate) tenant_header_name: String,
     pub(crate) default_tenant: Arc<TenantRuntime>,
     pub(crate) tenants_by_id: HashMap<String, Arc<TenantRuntime>>,
@@ -51,6 +58,10 @@ pub struct TenantStoreHandle {
 impl TenantStore {
     pub fn new(
         mode: TenancyMode,
+        config_dir: PathBuf,
+        tenancy: TenancyConfig,
+        admin_auth_header: String,
+        admin_auth_secret: Option<String>,
         tenant_header_name: String,
         default_tenant: Arc<TenantRuntime>,
         tenants_by_id: HashMap<String, Arc<TenantRuntime>>,
@@ -61,6 +72,10 @@ impl TenantStore {
     ) -> Self {
         Self {
             mode,
+            config_dir,
+            tenancy,
+            admin_auth_header,
+            admin_auth_secret,
             tenant_header_name,
             default_tenant,
             tenants_by_id,
@@ -101,17 +116,11 @@ impl TenantStoreHandle {
         Ok(rebuilt)
     }
 
-    pub fn reload_tenant(
-        &self,
-        config: &AppConfig,
-        tenant_id: &str,
-    ) -> Result<Arc<TenantStore>, Box<dyn Error>> {
-        config.validate()?;
-
+    pub fn reload_tenant(&self, tenant_id: &str) -> Result<Arc<TenantStore>, Box<dyn Error>> {
         let current = self.current();
-        let updated = match config.tenancy.mode {
-            TenancyMode::Single => reload_single_mode_store(config, tenant_id)?,
-            TenancyMode::Multi => reload_multi_mode_tenant(config, &current, tenant_id)?,
+        let updated = match current.mode {
+            TenancyMode::Single => reload_single_mode_store(&current, tenant_id)?,
+            TenancyMode::Multi => reload_multi_mode_tenant(&current, tenant_id)?,
         };
 
         *self.current.write().unwrap() = updated.clone();
@@ -130,9 +139,14 @@ pub fn build_runtime_store(config: &AppConfig) -> Result<Arc<TenantStore>, Box<d
 
 fn build_single_mode_store(config: &AppConfig) -> Result<Arc<TenantStore>, Box<dyn Error>> {
     let default_tenant = build_single_mode_default_runtime(config)?;
+    let admin_auth = resolve_admin_auth(&config.tenancy.admin_auth)?;
 
     Ok(Arc::new(TenantStore::new(
         TenancyMode::Single,
+        config.config_dir.clone(),
+        config.tenancy.clone(),
+        config.tenancy.admin_auth.header.clone(),
+        admin_auth,
         config.tenancy.normalized_tenant_header(),
         default_tenant,
         HashMap::new(),
@@ -149,9 +163,14 @@ fn build_multi_mode_store(config: &AppConfig) -> Result<Arc<TenantStore>, Box<dy
     let default_tenant = build_multi_mode_default_runtime(config)?;
     let tenants_by_id = build_named_tenant_runtimes(tenancy, &tenant_header)?;
     let lookup_state = build_lookup_state(tenancy, &tenant_header)?;
+    let admin_auth = resolve_admin_auth(&tenancy.admin_auth)?;
 
     Ok(Arc::new(TenantStore::new(
         TenancyMode::Multi,
+        config.config_dir.clone(),
+        tenancy.clone(),
+        tenancy.admin_auth.header.clone(),
+        admin_auth,
         tenant_header,
         default_tenant,
         tenants_by_id,
@@ -165,7 +184,13 @@ fn build_multi_mode_store(config: &AppConfig) -> Result<Arc<TenantStore>, Box<dy
 fn build_single_mode_default_runtime(
     config: &AppConfig,
 ) -> Result<Arc<TenantRuntime>, Box<dyn Error>> {
-    let registry = build_registry_from_layers(&[config.config_dir.as_path()])?;
+    build_single_mode_default_runtime_from_path(&config.config_dir)
+}
+
+fn build_single_mode_default_runtime_from_path(
+    config_dir: &PathBuf,
+) -> Result<Arc<TenantRuntime>, Box<dyn Error>> {
+    let registry = build_registry_from_layers(&[config_dir.as_path()])?;
     Ok(Arc::new(TenantRuntime {
         label: DEFAULT_TENANT_ID.to_string(),
         registry,
@@ -176,7 +201,13 @@ fn build_single_mode_default_runtime(
 fn build_multi_mode_default_runtime(
     config: &AppConfig,
 ) -> Result<Arc<TenantRuntime>, Box<dyn Error>> {
-    let default_root = config.tenancy.tenants_dir.join(DEFAULT_TENANT_ID);
+    build_multi_mode_default_runtime_from_tenancy(&config.tenancy)
+}
+
+fn build_multi_mode_default_runtime_from_tenancy(
+    tenancy: &TenancyConfig,
+) -> Result<Arc<TenantRuntime>, Box<dyn Error>> {
+    let default_root = tenancy.tenants_dir.join(DEFAULT_TENANT_ID);
     let registry = build_registry_from_layers(&[default_root.as_path()])?;
     Ok(Arc::new(TenantRuntime {
         label: DEFAULT_TENANT_ID.to_string(),
@@ -186,26 +217,40 @@ fn build_multi_mode_default_runtime(
 }
 
 fn reload_single_mode_store(
-    config: &AppConfig,
+    current: &Arc<TenantStore>,
     tenant_id: &str,
 ) -> Result<Arc<TenantStore>, Box<dyn Error>> {
     if tenant_id != DEFAULT_TENANT_ID {
         return Err(format!("unknown tenant '{}'", tenant_id).into());
     }
 
-    build_single_mode_store(config)
+    let default_tenant = build_single_mode_default_runtime_from_path(&current.config_dir)?;
+
+    Ok(Arc::new(TenantStore::new(
+        TenancyMode::Single,
+        current.config_dir.clone(),
+        current.tenancy.clone(),
+        current.admin_auth_header.clone(),
+        current.admin_auth_secret.clone(),
+        current.tenant_header_name.clone(),
+        default_tenant,
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashSet::new(),
+        HashSet::new(),
+    )))
 }
 
 fn reload_multi_mode_tenant(
-    config: &AppConfig,
     current: &Arc<TenantStore>,
     tenant_id: &str,
 ) -> Result<Arc<TenantStore>, Box<dyn Error>> {
-    let tenancy = &config.tenancy;
+    let tenancy = &current.tenancy;
     let tenant_header = tenancy.normalized_tenant_header();
     let mut tenants_by_id = current.tenants_by_id.clone();
     let default_tenant = if tenant_id == DEFAULT_TENANT_ID {
-        build_multi_mode_default_runtime(config)?
+        build_multi_mode_default_runtime_from_tenancy(tenancy)?
     } else {
         current.default_tenant()
     };
@@ -233,6 +278,10 @@ fn reload_multi_mode_tenant(
 
     Ok(Arc::new(TenantStore::new(
         current.mode.clone(),
+        current.config_dir.clone(),
+        current.tenancy.clone(),
+        current.admin_auth_header.clone(),
+        current.admin_auth_secret.clone(),
         current.tenant_header_name.clone(),
         default_tenant,
         tenants_by_id,
@@ -337,6 +386,10 @@ fn collect_known_key_names(
     }
 
     (known_header_key_names, known_query_key_names)
+}
+
+fn resolve_admin_auth(admin_auth: &AdminAuthConfig) -> Result<Option<String>, Box<dyn Error>> {
+    Ok(admin_auth.resolved_value()?)
 }
 
 fn register_header_lookups(

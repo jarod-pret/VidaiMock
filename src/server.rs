@@ -293,6 +293,7 @@ mod tests {
     };
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
+    use clap::Parser;
     use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
@@ -317,6 +318,7 @@ mod tests {
                 content_type: None,
             }],
             response_file: None,
+            reload_args: None,
             chaos: crate::config::ChaosConfig {
                 enabled: false,
                 drop_pct: 0.0,
@@ -347,6 +349,10 @@ mod tests {
 
         Arc::new(TenantStore::new(
             TenancyMode::Single,
+            PathBuf::from("config"),
+            crate::tenancy::TenancyConfig::default(),
+            "x-admin-key".to_string(),
+            None,
             "x-tenant".to_string(),
             Arc::new(crate::tenancy::TenantRuntime {
                 label: crate::tenancy::DEFAULT_TENANT_ID.to_string(),
@@ -504,6 +510,10 @@ mod tests {
             None,
             Arc::new(TenantStoreHandle::new(Arc::new(TenantStore::new(
                 TenancyMode::Single,
+                PathBuf::from("config"),
+                crate::tenancy::TenancyConfig::default(),
+                "x-admin-key".to_string(),
+                None,
                 "x-tenant".to_string(),
                 Arc::new(crate::tenancy::TenantRuntime {
                     label: crate::tenancy::DEFAULT_TENANT_ID.to_string(),
@@ -649,6 +659,7 @@ mod tests {
                 content_type: None,
             }],
             response_file: None,
+            reload_args: None,
         }
     }
 
@@ -705,6 +716,7 @@ mod tests {
                 content_type: None,
             }],
             response_file: None,
+            reload_args: None,
         }
     }
 
@@ -741,6 +753,7 @@ mod tests {
                 content_type: None,
             }],
             response_file: None,
+            reload_args: None,
         }
     }
 
@@ -759,6 +772,83 @@ mod tests {
             .await
             .unwrap();
         String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    fn toml_path(value: &std::path::Path) -> String {
+        value.display().to_string().replace('\\', "\\\\")
+    }
+
+    fn write_file_backed_management_config(
+        base_dir: &std::path::Path,
+        admin_key: &str,
+        acme_key: &str,
+        duplicate_acme: bool,
+    ) -> PathBuf {
+        fs::create_dir_all(base_dir).unwrap();
+        let config_path = base_dir.join("mock-server.toml");
+        let duplicate_tenants = if duplicate_acme {
+            r#"
+[[tenancy.tenants]]
+id = "acme"
+"#
+        } else {
+            ""
+        };
+
+        fs::write(
+            &config_path,
+            format!(
+                r#"
+port = 8100
+workers = 1
+log_level = "debug"
+config_dir = "{config_dir}"
+
+[tenancy]
+mode = "multi"
+tenants_dir = "{tenants_dir}"
+tenant_header = "x-tenant"
+
+[tenancy.admin_auth]
+header = "x-admin-key"
+value = "{admin_key}"
+
+[[tenancy.tenants]]
+id = "acme"
+
+[[tenancy.tenants.keys]]
+source = "header"
+name = "x-api-key"
+value = "{acme_key}"
+
+[[tenancy.tenants]]
+id = "globex"
+
+[[tenancy.tenants.keys]]
+source = "header"
+name = "x-api-key"
+value = "secret-globex"
+{duplicate_tenants}
+"#,
+                config_dir = toml_path(&base_dir.join("config")),
+                tenants_dir = toml_path(&base_dir.join("tenants")),
+                admin_key = admin_key,
+                acme_key = acme_key,
+                duplicate_tenants = duplicate_tenants,
+            ),
+        )
+        .unwrap();
+
+        config_path
+    }
+
+    fn load_file_backed_management_config(config_path: &std::path::Path) -> AppConfig {
+        let args = crate::config::Cli::parse_from(&[
+            "mock-server",
+            "--config",
+            config_path.to_str().unwrap(),
+        ]);
+        AppConfig::build_config(args).unwrap()
     }
 
     #[tokio::test]
@@ -1026,7 +1116,9 @@ mod tests {
             r#"{"tenant":"globex"}"#,
         );
 
-        let config = managed_multi_tenant_config(&temp_base);
+        let config_path =
+            write_file_backed_management_config(&temp_base, "global-admin-secret", "secret-acme", false);
+        let config = load_file_backed_management_config(&config_path);
         let app = create_app(
             config.clone(),
             None,
@@ -1084,6 +1176,158 @@ mod tests {
             .await
             .unwrap();
         assert!(response_text(after).await.contains("acme-after"));
+
+        fs::remove_dir_all(temp_base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_admin_reload_rereads_config_file_changes() {
+        let temp_base = management_test_base("test_admin_reload_rereads_config_file");
+        write_provider(
+            &temp_base.join("tenants/default/providers/openai.yaml"),
+            r#"{"tenant":"default"}"#,
+        );
+        write_provider(
+            &temp_base.join("tenants/acme/providers/openai.yaml"),
+            r#"{"tenant":"acme"}"#,
+        );
+        write_provider(
+            &temp_base.join("tenants/globex/providers/openai.yaml"),
+            r#"{"tenant":"globex"}"#,
+        );
+
+        let config_path = write_file_backed_management_config(
+            &temp_base,
+            "global-admin-secret",
+            "secret-acme",
+            false,
+        );
+        let config = load_file_backed_management_config(&config_path);
+        let app = create_app(
+            config.clone(),
+            None,
+            Arc::new(TenantStoreHandle::new(
+                build_runtime_store(&config).unwrap(),
+            )),
+        )
+        .await;
+
+        write_file_backed_management_config(
+            &temp_base,
+            "global-admin-secret",
+            "secret-acme-rotated",
+            false,
+        );
+
+        let reload = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/reload")
+                    .header("x-admin-key", "global-admin-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reload.status(), StatusCode::OK);
+
+        let old_key_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("x-api-key", "secret-acme")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(old_key_response.status(), StatusCode::UNAUTHORIZED);
+
+        let new_key_response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("x-api-key", "secret-acme-rotated")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(new_key_response.status(), StatusCode::OK);
+        assert!(response_text(new_key_response).await.contains("acme"));
+
+        fs::remove_dir_all(temp_base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_failed_config_file_reload_keeps_previous_runtime_active() {
+        let temp_base = management_test_base("test_failed_config_reload_keeps_runtime");
+        write_provider(
+            &temp_base.join("tenants/default/providers/openai.yaml"),
+            r#"{"tenant":"default"}"#,
+        );
+        write_provider(
+            &temp_base.join("tenants/acme/providers/openai.yaml"),
+            r#"{"tenant":"acme"}"#,
+        );
+        write_provider(
+            &temp_base.join("tenants/globex/providers/openai.yaml"),
+            r#"{"tenant":"globex"}"#,
+        );
+
+        let config_path = write_file_backed_management_config(
+            &temp_base,
+            "global-admin-secret",
+            "secret-acme",
+            false,
+        );
+        let config = load_file_backed_management_config(&config_path);
+        let app = create_app(
+            config.clone(),
+            None,
+            Arc::new(TenantStoreHandle::new(
+                build_runtime_store(&config).unwrap(),
+            )),
+        )
+        .await;
+
+        write_file_backed_management_config(&temp_base, "global-admin-secret", "secret-acme", true);
+
+        let reload = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/reload")
+                    .header("x-admin-key", "global-admin-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reload.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let after_failed_reload = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("x-api-key", "secret-acme")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(after_failed_reload.status(), StatusCode::OK);
+        assert!(response_text(after_failed_reload).await.contains("acme"));
 
         fs::remove_dir_all(temp_base).unwrap();
     }
