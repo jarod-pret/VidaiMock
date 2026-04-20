@@ -87,8 +87,6 @@ pub async fn create_app(
     metrics_handle: Option<PrometheusHandle>,
     tenants: Arc<TenantStoreHandle>,
 ) -> Router {
-    // Legacy support logic removed as we fully transition to providers for content types too
-
     let state = Arc::new(AppState {
         config: Arc::new(config.clone()),
         tenants,
@@ -418,13 +416,6 @@ mod tests {
     #[tokio::test]
     async fn test_echo_endpoint() {
         let mut config = get_test_config();
-        // Ensure config knows where presets are
-        // This line seems to be part of a larger change or a typo in the instruction.
-        // If `presets_dir` is meant to be defined, it's missing from the context.
-        // Assuming the intent was to set config_dir if a presets_dir was available,
-        // but without `presets_dir` definition, this line would cause a compile error.
-        // For now, I will insert the line as provided, but it will likely require further context.
-        // config.config_dir = presets_dir.clone(); // This line is commented out as `presets_dir` is undefined.
         config.endpoints = vec![crate::config::EndpointConfig {
             path: "/echo".to_string(),
             format: "echo".to_string(),
@@ -1024,6 +1015,128 @@ priority: 100
                 Request::builder()
                     .uri("/v1/models")
                     .header("x-tenant", "globex")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(globex_response.status(), StatusCode::OK);
+        let globex_body: serde_json::Value =
+            serde_json::from_str(&response_text(globex_response).await).unwrap();
+        let globex_models = globex_body["data"].to_string();
+        assert!(globex_models.contains("globex-openai"));
+        assert!(!globex_models.contains("acme-openai"));
+
+        fs::remove_dir_all(temp_base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_models_endpoint_resolves_tenant_from_query_key() {
+        let temp_base = management_test_base("test_models_endpoint_query_tenant_resolution");
+        write_provider(
+            &temp_base.join("tenants/acme/providers/openai.yaml"),
+            r#"{"tenant":"acme"}"#,
+        );
+        write_provider(
+            &temp_base.join("tenants/globex/providers/openai.yaml"),
+            r#"{"tenant":"globex"}"#,
+        );
+
+        fs::write(
+            temp_base.join("tenants/acme/providers/openai.yaml"),
+            r#"
+name: "acme-openai"
+matcher: "^/v1/chat/completions$"
+response_body: '{"tenant":"acme"}'
+priority: 100
+"#,
+        )
+        .unwrap();
+        fs::write(
+            temp_base.join("tenants/globex/providers/openai.yaml"),
+            r#"
+name: "globex-openai"
+matcher: "^/v1/chat/completions$"
+response_body: '{"tenant":"globex"}'
+priority: 100
+"#,
+        )
+        .unwrap();
+
+        let config = AppConfig {
+            host: "127.0.0.1".to_string(),
+            port: 0,
+            workers: 1,
+            log_level: "debug".to_string(),
+            config_dir: PathBuf::from("config"),
+            tenancy: TenancyConfig {
+                mode: TenancyMode::Multi,
+                tenants_dir: temp_base.join("tenants"),
+                tenant_header: "x-tenant".to_string(),
+                admin_auth: AdminAuthConfig::default(),
+                tenants: vec![
+                    crate::tenancy::TenantConfig {
+                        id: "acme".to_string(),
+                        keys: vec![crate::tenancy::TenantKeyConfig {
+                            source: TenantKeySource::Query,
+                            name: "api_key".to_string(),
+                            value: "secret-acme".to_string(),
+                            value_file: None,
+                            value_env: None,
+                        }],
+                    },
+                    crate::tenancy::TenantConfig {
+                        id: "globex".to_string(),
+                        keys: vec![crate::tenancy::TenantKeyConfig {
+                            source: TenantKeySource::Query,
+                            name: "api_key".to_string(),
+                            value: "secret-globex".to_string(),
+                            value_file: None,
+                            value_env: None,
+                        }],
+                    },
+                ],
+            },
+            latency: crate::config::LatencyConfig::default(),
+            chaos: crate::config::ChaosConfig::default(),
+            endpoints: vec![crate::config::EndpointConfig {
+                path: "/v1/chat/completions".to_string(),
+                format: "openai".to_string(),
+                content_type: None,
+            }],
+            response_file: None,
+            reload_args: None,
+        };
+        let app = create_app(
+            config.clone(),
+            None,
+            Arc::new(TenantStoreHandle::new(
+                build_runtime_store(&config).unwrap(),
+            )),
+        )
+        .await;
+
+        let acme_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/models?api_key=secret-acme")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(acme_response.status(), StatusCode::OK);
+        let acme_body: serde_json::Value =
+            serde_json::from_str(&response_text(acme_response).await).unwrap();
+        let acme_models = acme_body["data"].to_string();
+        assert!(acme_models.contains("acme-openai"));
+        assert!(!acme_models.contains("globex-openai"));
+
+        let globex_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/models?api_key=secret-globex")
                     .body(Body::empty())
                     .unwrap(),
             )

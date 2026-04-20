@@ -135,6 +135,7 @@ Resolution rules:
 - Header plus key must resolve to the same tenant.
 - No header and no key falls back to the internal default tenant.
 - Unknown tenant, unknown key, or header/key conflict is rejected.
+- Tenant key sources supported in config are `header` and `query`; `host` and `path` are rejected during validation.
 - Accepted requests use tenant-labelled metrics.
 - Rejected requests use separate rejection metrics.
 
@@ -365,7 +366,7 @@ response_template: "my/template.j2"  # Tera template path
 status_code: "200"                   # HTTP status (static or Tera expression)
 priority: 10                         # Higher matches first
 stream:
-  enabled: true
+  enabled: true                      # Compatibility field; the stream block itself enables streaming
   frame_format: raw                  # "raw" = template controls SSE framing
   lifecycle:
     on_start:

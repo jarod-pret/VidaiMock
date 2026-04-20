@@ -40,7 +40,6 @@ use crate::tenancy::{
     list_tenants, tenant_view, ReloadView, TenancyMode, TenantRequestMetrics, TenantResolution,
     TenantResolutionError, TenantResolutionRejection, TenantStoreHandle,
 };
-// use crate::formats::load_response; // Function removed/unused
 
 #[derive(Clone)]
 pub struct AppState {
@@ -524,10 +523,9 @@ pub async fn mock_handler(
 
 pub async fn models_handler(
     Extension(state): Extension<Arc<AppState>>,
-    OriginalUri(_uri): OriginalUri,
     headers: HeaderMap,
+    Query(query_params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let query_params = HashMap::new();
     let resolution = match resolve_tenant_or_reject(&state, &headers, &query_params) {
         Ok(resolution) => resolution,
         Err(response) => return response,

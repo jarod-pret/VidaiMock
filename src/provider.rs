@@ -18,7 +18,7 @@
  */
 
 use glob::glob;
-use rand::Rng; // For random functions
+use rand::Rng;
 use regex::Regex;
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
@@ -57,6 +57,8 @@ pub struct ProviderConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderStreamConfig {
+    /// Compatibility flag retained for existing configs. The presence of the
+    /// `stream` block controls streaming behavior in the current runtime.
     #[serde(default)]
     pub enabled: bool,
     /// Default format string for data tokens if no detailed lifecycle is provided
@@ -109,8 +111,6 @@ impl ProviderRegistry {
         &mut self,
         config_dirs: &[&Path],
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // let templates_pattern = config_dir.join("templates/**/*");
-
         // 1. Load Templates
         // Setup Tera with all templates (embedded + disk)
         let mut tera = Tera::default();

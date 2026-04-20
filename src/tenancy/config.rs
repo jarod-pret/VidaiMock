@@ -106,7 +106,9 @@ pub enum TenantKeySource {
     #[default]
     Header,
     Query,
+    /// Parsed from config for compatibility, but rejected by validation in this branch.
     Host,
+    /// Parsed from config for compatibility, but rejected by validation in this branch.
     Path,
 }
 
@@ -196,8 +198,8 @@ impl TenancyConfig {
             for key in &tenant.keys {
                 if !key.supports_runtime_resolution(&tenant_header) {
                     return Err(format!(
-                        "unsupported tenant key source {:?} for tenant '{}'",
-                        key.source, tenant.id
+                        "unsupported tenant key source {:?} for tenant '{}'; only header and query are supported",
+                        key.source, tenant.id,
                     ));
                 }
 
@@ -559,5 +561,30 @@ mod tests {
 
         let error = tenancy.validate().unwrap_err();
         assert!(error.contains("ambiguous tenant key match"));
+    }
+
+    #[test]
+    fn host_and_path_tenant_key_sources_are_rejected() {
+        for source in [TenantKeySource::Host, TenantKeySource::Path] {
+            let tenancy = TenancyConfig {
+                mode: TenancyMode::Multi,
+                tenants_dir: PathBuf::from("tenants"),
+                tenant_header: default_tenant_header(),
+                admin_auth: AdminAuthConfig::default(),
+                tenants: vec![TenantConfig {
+                    id: "acme".to_string(),
+                    keys: vec![TenantKeyConfig {
+                        source,
+                        name: "tenant".to_string(),
+                        value: "acme".to_string(),
+                        value_file: None,
+                        value_env: None,
+                    }],
+                }],
+            };
+
+            let error = tenancy.validate().unwrap_err();
+            assert!(error.contains("only header and query are supported"));
+        }
     }
 }

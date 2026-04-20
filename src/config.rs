@@ -235,6 +235,8 @@ impl AppConfig {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ChaosConfig {
+    /// Compatibility flag retained for config stability. Chaos behavior is
+    /// driven by the percentages and delay fields below.
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
