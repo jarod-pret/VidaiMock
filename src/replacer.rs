@@ -17,14 +17,19 @@
  * VidaiMock: High-performance LLM API Mock Server.
  */
 
-use tera::Context;
+use chrono::{Utc, SecondsFormat};
+use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
-use chrono::{Utc, SecondsFormat};
+use tera::Context;
 use uuid::Uuid;
 
-
 pub struct Replacer;
+
+#[derive(Debug, Serialize)]
+pub struct TemplateTenantContext<'a> {
+    pub id: &'a str,
+}
 
 impl Replacer {
     /// Builds a Tera Context from the request data
@@ -34,6 +39,7 @@ impl Replacer {
         query_params: &HashMap<String, String>,
         path_segments: &[String],
         model: &str,
+        tenant: TemplateTenantContext<'_>,
     ) -> Context {
         let mut context = Context::new();
 
@@ -51,10 +57,11 @@ impl Replacer {
         context.insert("headers", headers);
         context.insert("query", query_params);
         context.insert("path_segments", path_segments);
+        context.insert("tenant", &tenant);
 
-        // 3. Helper Functions (via register_function if we had mutable access to terra, 
+        // 3. Helper Functions (via register_function if we had mutable access to terra,
         // but for Context we just add data. Complex logic should be in filters/functions registered on Tera instance)
-        
+
         context
     }
 }

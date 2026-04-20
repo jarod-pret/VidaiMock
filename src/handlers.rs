@@ -17,7 +17,7 @@
  * VidaiMock: High-performance LLM API Mock Server.
  */
 
-use crate::replacer::Replacer;
+use crate::replacer::{Replacer, TemplateTenantContext};
 use axum::{
     body::Bytes,
     extract::{Json, OriginalUri, Path, Query},
@@ -28,6 +28,7 @@ use axum::{
 use futures::stream::{self};
 use futures::StreamExt;
 use rand::Rng;
+use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -46,6 +47,13 @@ use crate::tenancy::{
 pub struct AppState {
     pub config: Arc<AppConfig>,
     pub tenants: Arc<TenantStoreHandle>,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct PublicStatusView {
+    pub status: &'static str,
+    pub version: &'static str,
+    pub port: u16,
 }
 
 /// Apply configured latency delay for realistic simulation mode
@@ -255,8 +263,12 @@ fn internal_error_response(message: &str, error: impl std::fmt::Display) -> Resp
     (StatusCode::INTERNAL_SERVER_ERROR, format!("{}.", message)).into_response()
 }
 
-pub async fn status_handler(Extension(state): Extension<Arc<AppState>>) -> Json<AppConfig> {
-    Json(state.config.as_ref().clone())
+pub async fn status_handler(Extension(state): Extension<Arc<AppState>>) -> Json<PublicStatusView> {
+    Json(PublicStatusView {
+        status: "ok",
+        version: env!("CARGO_PKG_VERSION"),
+        port: state.config.port,
+    })
 }
 
 pub async fn admin_tenants_handler(
@@ -427,6 +439,9 @@ pub async fn mock_handler(
             &query_params,
             &path_segments,
             &provider.name,
+            TemplateTenantContext {
+                id: &resolution.tenant.label,
+            },
         );
 
         // Process request_mapping: Extract variables using Tera (e.g. prompt extraction)
@@ -604,6 +619,9 @@ async fn streaming_handler_inner(
                 &query_params,
                 &path_segments,
                 &provider.name,
+                TemplateTenantContext {
+                    id: &resolution.tenant.label,
+                },
             );
 
             // Process request_mapping

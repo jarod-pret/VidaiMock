@@ -247,6 +247,7 @@ fn reload_multi_mode_tenant(
     tenant_id: &str,
 ) -> Result<Arc<TenantStore>, Box<dyn Error>> {
     let tenancy = &current.tenancy;
+    tenancy.validate()?;
     let tenant_header = tenancy.normalized_tenant_header();
     let mut tenants_by_id = current.tenants_by_id.clone();
     let default_tenant = if tenant_id == DEFAULT_TENANT_ID {
@@ -397,10 +398,20 @@ fn register_header_lookups(
     tenancy: &TenancyConfig,
     header_lookup: &mut HashMap<String, String>,
 ) -> Result<(), Box<dyn Error>> {
-    header_lookup.insert(tenant.id.trim().to_ascii_lowercase(), tenant.id.clone());
+    register_header_lookup_value(
+        header_lookup,
+        tenancy.normalized_tenant_header(),
+        tenant.id.trim().to_ascii_lowercase(),
+        &tenant.id,
+    )?;
 
     for value in tenant.explicit_header_values(&tenancy.normalized_tenant_header())? {
-        header_lookup.insert(value.trim().to_ascii_lowercase(), tenant.id.clone());
+        register_header_lookup_value(
+            header_lookup,
+            tenancy.normalized_tenant_header(),
+            value.trim().to_ascii_lowercase(),
+            &tenant.id,
+        )?;
     }
 
     Ok(())
@@ -412,15 +423,59 @@ fn register_key_lookups(
     key_lookup: &mut HashMap<ResolvedRequestKey, String>,
 ) -> Result<(), Box<dyn Error>> {
     for api_key in tenant.api_keys(tenant_header)? {
-        key_lookup.insert(
+        register_key_lookup_value(
+            key_lookup,
             ResolvedRequestKey {
                 source: api_key.source,
                 name: api_key.name,
                 value: api_key.value,
             },
-            tenant.id.clone(),
-        );
+            &tenant.id,
+        )?;
     }
 
+    Ok(())
+}
+
+fn register_header_lookup_value(
+    header_lookup: &mut HashMap<String, String>,
+    header_name: String,
+    lookup_value: String,
+    tenant_id: &str,
+) -> Result<(), Box<dyn Error>> {
+    if let Some(existing_tenant_id) = header_lookup.get(&lookup_value) {
+        if existing_tenant_id != tenant_id {
+            return Err(format!(
+                "ambiguous tenant key match between '{}' and '{}' on Header '{}={}'",
+                existing_tenant_id, tenant_id, header_name, lookup_value
+            )
+            .into());
+        }
+    }
+
+    header_lookup.insert(lookup_value, tenant_id.to_string());
+    Ok(())
+}
+
+fn register_key_lookup_value(
+    key_lookup: &mut HashMap<ResolvedRequestKey, String>,
+    resolved_key: ResolvedRequestKey,
+    tenant_id: &str,
+) -> Result<(), Box<dyn Error>> {
+    if let Some(existing_tenant_id) = key_lookup.get(&resolved_key) {
+        if existing_tenant_id != tenant_id {
+            return Err(format!(
+                "ambiguous tenant key match between '{}' and '{}' on {:?} '{}={}'",
+                existing_tenant_id,
+                tenant_id,
+                resolved_key.source,
+                resolved_key.name,
+                resolved_key.value
+            )
+            .into());
+        }
+    }
+
+    key_lookup.insert(resolved_key, tenant_id.to_string());
     Ok(())
 }
