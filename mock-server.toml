@@ -13,7 +13,7 @@ mode = "single" # "single" uses config/ and stays backward-compatible. "multi" u
 # [[tenancy.tenants]]
 # id = "acme"
 # [[tenancy.tenants.keys]]
-# source = "header" # Supported key sources in this branch: "header" and "query". "host" and "path" are rejected.
+# source = "header" # This implementation supports "header" and "query". "host" and "path" are currently unsupported and rejected.
 # name = "x-api-key"
 # value = "acme-secret"
 

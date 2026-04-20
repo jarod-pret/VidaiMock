@@ -106,9 +106,9 @@ pub enum TenantKeySource {
     #[default]
     Header,
     Query,
-    /// Parsed from config for compatibility, but rejected by validation in this branch.
+    /// Parsed from config for compatibility, but rejected by validation in this implementation.
     Host,
-    /// Parsed from config for compatibility, but rejected by validation in this branch.
+    /// Parsed from config for compatibility, but rejected by validation in this implementation.
     Path,
 }
 
