@@ -389,6 +389,8 @@ impl TenancyConfig {
                 continue;
             }
 
+            // Tenant-owned metadata lives beside that tenant's providers/templates
+            // so each workspace is self-describing on disk in multi mode.
             if normalized_dir == DEFAULT_TENANT_ID {
                 return Err(format!(
                     "tenant metadata '{}' must use id 'default' when stored under tenants/default/",
@@ -772,6 +774,9 @@ fn register_management_auth_identity(
         return Ok(());
     };
 
+    // Management auth is keyed by the effective header+secret identity.
+    // That lets operators reuse the same secret text under different headers
+    // without making two tenants resolve from the same incoming credential.
     let identity = ManagementAuthIdentity {
         header: management_auth.header.clone(),
         secret: management_auth.secret,

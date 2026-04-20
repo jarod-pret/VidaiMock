@@ -398,7 +398,8 @@ fn build_named_tenant_runtime(
     tenant_header: &str,
 ) -> Result<Arc<TenantRuntime>, Box<dyn Error>> {
     let root_dir = tenancy.tenants_dir.join(&tenant.id);
-    // Each tenant runtime is isolated to built-ins plus its own overlay.
+    // This is logical isolation inside one shared process: each tenant gets its
+    // own registry/templates/policy view, while the engine/server stay global.
     let registry = build_registry_from_layers(&[root_dir.as_path()])?;
     let (management_auth_header, management_auth_secret) =
         resolve_tenant_management_auth(Some(tenant))?;
@@ -498,6 +499,8 @@ fn validate_management_auth_uniqueness_for_reload(
 ) -> Result<(), Box<dyn Error>> {
     // Tenant reload stays local: compare the reloaded tenant-admin identity
     // against the current live store instead of re-reading unrelated tenants.
+    // That keeps /tenant/reload narrow and avoids failing just because another
+    // tenant currently has a broken secret source elsewhere on disk.
     let Some(reloaded_secret) = reloaded_runtime.management_auth_secret.as_deref() else {
         return Ok(());
     };

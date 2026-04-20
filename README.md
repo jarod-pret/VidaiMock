@@ -193,6 +193,18 @@ Built-ins are always the base layer. The effective runtime is built-ins plus tha
 - Named tenants do not inherit from the default tenant.
 - The default tenant is fallback-only when no tenant signal is provided.
 
+What is isolated per tenant:
+- Providers, templates, and model listing
+- Tenant metadata exposed to templates
+- Tenant request keys and tenant-admin management auth
+- Tenant latency and chaos defaults
+
+What remains global:
+- The HTTP server process and streaming engine
+- Built-in base assets
+- Metrics/export pipeline and reload coordination
+- Global `/admin/*` operations
+
 ## 🔀 Tenant Resolution
 
 In multi mode, a request can resolve a tenant in three ways:
@@ -234,6 +246,8 @@ By default the tenant-admin header is `x-tenant-admin-key`, and it can be overri
 
 Tenant-admin credentials must be unique across tenants for each effective header+secret pair. Reusing the same secret under different tenant-admin headers is treated as a different identity, but sharing the same header+secret across tenants is rejected during validation and reload.
 
+`/tenant/*` is intentionally self-management, not a second global admin surface. It derives tenant identity from tenant-admin auth so a tenant can inspect or reload only its own workspace.
+
 Tenant self-management is scoped to the tenant resolved from tenant-admin auth. An optional tenant header may confirm that identity, but it cannot retarget management to another tenant.
 
 In single mode there is no tenant-local management auth surface, so `/tenant/*` stays closed unless global admin auth is intentionally configured and supplied for default-tenant inspection/reload.
@@ -261,7 +275,8 @@ In single mode there is no tenant-local management auth surface, so `/tenant/*` 
 - `value_file` is preferred over `value_env`, and `value_env` is preferred over inline `value`.
 - Secret-bearing fields are intentionally omitted from serialized status/config output and sanitized management responses.
 - File- or env-backed secrets are preferred over inline values where possible.
-- Multi-tenancy provides logical workspace isolation inside one shared runtime, not separate processes, containers, or OS sandboxes.
+- Logical isolation here means request resolution, provider matching, templates, and tenant policy are separated by workspace, but tenants still share one process, one memory space, and one telemetry pipeline.
+- This is not hard isolation such as separate processes, containers, or OS sandboxes.
 
 ## 📦 Installation
 

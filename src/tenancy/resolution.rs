@@ -168,6 +168,9 @@ impl TenantStore {
     ) -> Result<Arc<TenantRuntime>, TenantManagementResolutionError> {
         let mut matched_tenant = None;
 
+        // Startup/reload validation keeps tenant-admin identities unique, so
+        // this remains a straightforward constant-time comparison pass instead
+        // of a second trust boundary that has to resolve ambiguity on the fly.
         for tenant in self.management_auth_candidates() {
             let Some(expected_secret) = tenant.management_auth_secret.as_deref() else {
                 continue;
