@@ -8,14 +8,14 @@ mode = "single" # "single" uses config/ and stays backward-compatible. "multi" u
 # tenant_header = "x-tenant" # Optional explicit tenant header for multi mode requests.
 # [tenancy.admin_auth] # Optional global admin auth for /admin/* management endpoints.
 # header = "x-admin-key"
-# value = "change-me"
-# tenants_dir = "tenants" # In multi mode, each tenant schema lives under tenants/<id>/
+# value = "change-me" # Supported secret sources: value, value_file, value_env. File is preferred.
+# tenants_dir = "tenants" # In multi mode, each tenant schema lives under tenants/<id>/. tenants/default/ is only needed to customize the default tenant.
 # [[tenancy.tenants]]
 # id = "acme"
 # [[tenancy.tenants.keys]]
 # source = "header"
-# name = "x-tenant"
-# value = "acme"
+# name = "x-api-key"
+# value = "acme-secret"
 
 # Latency Simulation Configuration
 [latency]

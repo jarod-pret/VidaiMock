@@ -51,7 +51,7 @@ Plus: Tool calling (OpenAI `tool_calls` + Anthropic `tool_use` + Gemini `functio
 
 ## ✨ Key Features
 
-- **🚀 Zero Config / Zero Fixtures**: Single **~7MB binary**, instant startup, no Docker/DB, and zero setup required.
+- **🚀 Zero Config / Zero Fixtures**: Single **~7MB binary**, instant startup, no Docker/DB, and zero setup required in default single mode.
 - **🌊 Physics-Accurate Streaming**: Realistic TTFT and token-by-token delivery with **provider-native streaming payloads** (OpenAI SSE, Responses API typed events, Anthropic EventStream, Gemini, etc.)
 - **⚡ High Performance**: 50,000+ RPS in benchmark mode
 - **🎛️ Chaos & Error Testing**: Inject failures, latency, malformed responses, and **custom HTTP status codes** (400, 401, 404, 429, 500, etc.) for error path testing
@@ -77,9 +77,107 @@ Unlike tools that just record and replay static data or intercept browser reques
 ## 📂 Project Structure
 
 - `bin/`: The VidaiMock executable
-- `config/`: Default provider YAMLs and J2 templates
+- `config/`: Legacy single-mode provider YAMLs and templates
+- `tenants/`: Multi-mode tenant overlays when tenancy mode is `multi`
 - `examples/`: 20+ advanced templates (RAG, Tool calling, Fuzzing, etc.)
 - `scripts/`: Diagnostic and verification helpers
+
+## 🏢 Single Mode vs Multi Mode
+
+VidaiMock stays a small stateless runtime with no database requirement. Tenancy is explicit and configured in `mock-server.toml`:
+
+- `single`: backward-compatible mode that uses `config/`
+- `multi`: tenant-aware mode that uses `tenants/`
+
+Single mode is still the simplest path: run the binary, keep your YAML and templates under `config/`, and VidaiMock behaves exactly like the legacy layout.
+
+Multi mode keeps one shared runtime but resolves each accepted request to a tenant before provider matching. Isolation here is logical workspace isolation inside one process, not OS-level or process-level isolation.
+
+## 🗂️ Directory Layout
+
+Single mode uses the legacy layout:
+
+```text
+config/
+  providers/
+  templates/
+```
+
+Multi mode uses a tenant workspace layout:
+
+```text
+tenants/
+  default/   # optional: only needed when you want to customize the default tenant
+  acme/
+  globex/
+```
+
+Built-ins are always the base layer. The effective runtime is built-ins plus that tenant's own overrides.
+
+- The default tenant always exists internally.
+- `tenants/default/` is only required when you want to override the built-in default tenant behavior.
+- Named tenants do not inherit from each other.
+- Named tenants do not inherit from the default tenant.
+- The default tenant is fallback-only when no tenant signal is provided.
+
+## 🔀 Tenant Resolution
+
+In multi mode, a request can resolve a tenant in three ways:
+
+- Header only
+- Key only
+- Header plus key
+
+Resolution rules:
+
+- Header-only requests are allowed only when that tenant does not require a key.
+- Key-only requests are allowed when the key uniquely resolves a tenant.
+- Header plus key must resolve to the same tenant.
+- No header and no key falls back to the internal default tenant.
+- Unknown tenant, unknown key, or header/key conflict is rejected.
+- Accepted requests use tenant-labelled metrics.
+- Rejected requests use separate rejection metrics.
+
+## 🔐 Management Endpoints
+
+Global admin endpoints live under `/admin/` and use dedicated admin auth configured under `tenancy.admin_auth`.
+
+- `GET /admin/tenants`
+- `GET /admin/tenants/{id}`
+- `POST /admin/reload`
+
+If `tenancy.admin_auth` is unset, `/admin/*` stays closed.
+
+Tenant self-management lives under `/tenant/` and uses tenant auth, not global admin auth.
+
+- `GET /tenant`
+- `POST /tenant/reload`
+
+Tenant self-management is scoped to the resolved tenant only. A tenant-admin can inspect or reload its own tenant, but cannot target another tenant by path or input.
+
+## 🔄 Reload Semantics
+
+`POST /admin/reload` re-runs startup config loading from the original startup source, then rebuilds the live tenancy, admin-auth, provider, and template runtime atomically.
+
+- Reload validates before activation.
+- Failed reload keeps the previous working runtime active.
+- It refreshes the live tenancy/admin/provider/template runtime, not the whole process shape.
+- This is an explicit reload operation, not watch mode.
+
+`POST /tenant/reload` refreshes only the resolved tenant.
+
+- It rebuilds that tenant's runtime and tenant auth lookup state.
+- It does not reload every tenant.
+- Failed tenant reload keeps the previous working tenant state active.
+
+## 🔒 Security and Isolation Notes
+
+- VidaiMock is stateless and does not require a database.
+- Secret config supports `value`, `value_file`, and `value_env`.
+- `value_file` is preferred over `value_env`, and `value_env` is preferred over inline `value`.
+- Secret-bearing fields are intentionally omitted from serialized status/config output and sanitized management responses.
+- File- or env-backed secrets are preferred over inline values where possible.
+- Multi-tenancy provides logical workspace isolation inside one shared runtime, not separate processes, containers, or OS sandboxes.
 
 ## 📦 Installation
 
@@ -258,7 +356,7 @@ Any endpoint accepts these headers to override behavior per-request:
 
 ## 🎯 Provider Config Reference
 
-Provider YAML files in `config/providers/` define how endpoints match and respond:
+Provider YAML files in `config/providers/` define how endpoints match and respond in single mode. In multi mode, tenant overlays live under `tenants/<id>/providers/` and `tenants/<id>/templates/`.
 
 ```yaml
 name: "my-provider"
