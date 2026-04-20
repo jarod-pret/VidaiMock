@@ -17,19 +17,15 @@
  * VidaiMock: High-performance LLM API Mock Server.
  */
 
-use chrono::{Utc, SecondsFormat};
-use serde::Serialize;
+use chrono::{SecondsFormat, Utc};
 use serde_json::Value;
 use std::collections::HashMap;
 use tera::Context;
 use uuid::Uuid;
 
-pub struct Replacer;
+use crate::tenancy::TenantTemplateMetadata;
 
-#[derive(Debug, Serialize)]
-pub struct TemplateTenantContext<'a> {
-    pub id: &'a str,
-}
+pub struct Replacer;
 
 impl Replacer {
     /// Builds a Tera Context from the request data
@@ -39,15 +35,21 @@ impl Replacer {
         query_params: &HashMap<String, String>,
         path_segments: &[String],
         model: &str,
-        tenant: TemplateTenantContext<'_>,
+        tenant: &TenantTemplateMetadata,
     ) -> Context {
         let mut context = Context::new();
 
         // 1. Standard Variables
         context.insert("timestamp", &Utc::now().timestamp());
-        context.insert("iso_timestamp", &Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true));
+        context.insert(
+            "iso_timestamp",
+            &Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+        );
         context.insert("uuid", &Uuid::new_v4().to_string());
-        context.insert("request_id", &format!("req_{}", &Uuid::new_v4().to_string()[..8]));
+        context.insert(
+            "request_id",
+            &format!("req_{}", &Uuid::new_v4().to_string()[..8]),
+        );
         context.insert("model", model);
 
         // 2. Request Data

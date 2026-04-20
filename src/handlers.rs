@@ -17,7 +17,7 @@
  * VidaiMock: High-performance LLM API Mock Server.
  */
 
-use crate::replacer::{Replacer, TemplateTenantContext};
+use crate::replacer::Replacer;
 use axum::{
     body::Bytes,
     extract::{Json, OriginalUri, Path, Query},
@@ -34,11 +34,11 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 
-use crate::config::AppConfig;
+use crate::config::{AppConfig, ChaosConfig, LatencyConfig};
 use crate::provider::ProviderRegistry;
 use crate::tenancy::{
     list_tenants, tenant_view, ReloadView, TenancyMode, TenantRequestMetrics, TenantResolution,
-    TenantResolutionError, TenantResolutionRejection, TenantStoreHandle,
+    TenantResolutionError, TenantRuntime, TenantStoreHandle,
 };
 
 #[derive(Clone)]
@@ -55,9 +55,9 @@ pub struct PublicStatusView {
 }
 
 /// Apply configured latency delay for realistic simulation mode
-async fn apply_latency(config: &AppConfig, headers: &HeaderMap) {
-    let mut base = config.latency.base_ms;
-    let mut jitter_pct = config.latency.jitter_pct;
+async fn apply_latency(latency: &LatencyConfig, headers: &HeaderMap) {
+    let mut base = latency.base_ms;
+    let mut jitter_pct = latency.jitter_pct;
 
     // Header Overrides
     if let Some(val) = headers.get("x-vidai-latency") {
@@ -97,9 +97,9 @@ enum ChaosOutcome {
 
 /// Rolls the configured chaos dice and tells the caller what to do.
 /// Returns ChaosOutcome::None when no chaos fires.
-fn roll_chaos(config: &AppConfig, headers: &HeaderMap) -> ChaosOutcome {
-    let mut drop_pct = config.chaos.drop_pct;
-    let mut malformed_pct = config.chaos.malformed_pct;
+fn roll_chaos(chaos: &ChaosConfig, headers: &HeaderMap) -> ChaosOutcome {
+    let mut drop_pct = chaos.drop_pct;
+    let mut malformed_pct = chaos.malformed_pct;
 
     if let Some(val) = headers.get("x-vidai-chaos-drop") {
         if let Ok(val) = val.to_str().unwrap_or_default().parse::<f64>() {
@@ -125,6 +125,28 @@ fn roll_chaos(config: &AppConfig, headers: &HeaderMap) -> ChaosOutcome {
     }
 
     ChaosOutcome::None
+}
+
+fn streaming_chaos_defaults(runtime: &TenantRuntime, headers: &HeaderMap) -> (u64, f64) {
+    let mut trickle_ms = runtime.chaos.trickle_ms;
+    let mut disconnect_pct = runtime.chaos.disconnect_pct;
+
+    if let Some(val) = headers.get("x-vidai-chaos-trickle") {
+        if let Ok(ms) = val.to_str().unwrap_or_default().parse::<u64>() {
+            trickle_ms = ms;
+        }
+    }
+    if let Some(val) = headers.get("x-vidai-chaos-disconnect") {
+        if let Ok(pct) = val.to_str().unwrap_or_default().parse::<f64>() {
+            disconnect_pct = pct;
+        }
+    }
+
+    if trickle_ms == 0 {
+        trickle_ms = 20;
+    }
+
+    (trickle_ms, disconnect_pct)
 }
 
 /// Indicates how the response status was resolved.
@@ -215,24 +237,13 @@ fn response_with_metrics(mut response: Response, metrics: TenantRequestMetrics) 
 }
 
 fn tenant_rejection_response(error: TenantResolutionError) -> Response {
-    let status = match error.rejection {
-        TenantResolutionRejection::UnknownTenant => StatusCode::NOT_FOUND,
-        TenantResolutionRejection::UnknownKey
-        | TenantResolutionRejection::MissingKey
-        | TenantResolutionRejection::Conflict => StatusCode::UNAUTHORIZED,
-    };
-
-    let body = match error.rejection {
-        TenantResolutionRejection::UnknownTenant => "Unknown tenant.",
-        TenantResolutionRejection::UnknownKey => "Unknown tenant API key.",
-        TenantResolutionRejection::MissingKey => "Tenant requires an API key.",
-        TenantResolutionRejection::Conflict => {
-            "Tenant header and API key must resolve to the same tenant."
-        }
-    };
+    tracing::warn!(
+        reason = error.metric_label(),
+        "Tenant request rejected during multi-tenant resolution"
+    );
 
     response_with_metrics(
-        (status, body).into_response(),
+        (StatusCode::UNAUTHORIZED, "Tenant authentication failed.").into_response(),
         TenantRequestMetrics::Rejected {
             reason: error.metric_label(),
         },
@@ -264,13 +275,13 @@ fn resolve_tenant_admin_or_reject(
             .map_err(tenant_rejection_response);
     }
 
-    if !store.has_explicit_tenant_signal(headers, query_params) {
-        return Err((StatusCode::UNAUTHORIZED, "Tenant admin auth required.").into_response());
-    }
-
-    store
-        .resolve_request(headers, query_params)
-        .map_err(tenant_rejection_response)
+    store.resolve_management_request(headers).map_err(|_| {
+        (
+            StatusCode::UNAUTHORIZED,
+            "Tenant admin authentication required.",
+        )
+            .into_response()
+    })
 }
 
 fn constant_time_eq_str(left: &str, right: &str) -> bool {
@@ -464,13 +475,13 @@ pub async fn mock_handler(
     };
 
     // Apply latency simulation (with header override support)
-    apply_latency(&state.config, &headers).await;
+    apply_latency(&resolution.tenant.latency, &headers).await;
 
     // Roll chaos dice. Result becomes an injected status_code override that
     // flows through the normal rendering pipeline, so the body gets the
     // provider's error_template (OpenAI-shape, Anthropic-shape, etc.) instead
     // of a plain-text 500 that no SDK can parse.
-    let chaos = roll_chaos(&state.config, &headers);
+    let chaos = roll_chaos(&resolution.tenant.chaos, &headers);
     if let ChaosOutcome::Malformed = chaos {
         let mut resp = Response::new(axum::body::Body::from(
             "This is not valid JSON { missing_brace",
@@ -525,9 +536,7 @@ pub async fn mock_handler(
             &query_params,
             &path_segments,
             &provider.name,
-            TemplateTenantContext {
-                id: &resolution.tenant.label,
-            },
+            &resolution.tenant.template_metadata,
         );
 
         // Process request_mapping: Extract variables using Tera (e.g. prompt extraction)
@@ -634,7 +643,7 @@ pub async fn models_handler(
         Err(response) => return response,
     };
 
-    apply_latency(&state.config, &headers).await;
+    apply_latency(&resolution.tenant.latency, &headers).await;
 
     let mut model_list = Vec::new();
 
@@ -688,7 +697,7 @@ pub async fn streaming_handler(
 }
 
 async fn streaming_handler_inner(
-    state: Arc<AppState>,
+    _state: Arc<AppState>,
     resolution: TenantResolution,
     uri: axum::http::Uri,
     headers: HeaderMap,
@@ -701,7 +710,7 @@ async fn streaming_handler_inner(
     // Streams don't have a natural "streaming error response" — real providers
     // respond with a non-streaming HTTP error when the upstream fails.
     // Roll chaos up front; if malformed, return a plain malformed body.
-    let stream_chaos = roll_chaos(&state.config, &headers);
+    let stream_chaos = roll_chaos(&resolution.tenant.chaos, &headers);
     if let ChaosOutcome::Malformed = stream_chaos {
         let mut resp = Response::new(axum::body::Body::from(
             "This is not valid JSON { missing_brace",
@@ -731,9 +740,7 @@ async fn streaming_handler_inner(
                 &query_params,
                 &path_segments,
                 &provider.name,
-                TemplateTenantContext {
-                    id: &resolution.tenant.label,
-                },
+                &resolution.tenant.template_metadata,
             );
 
             // Process request_mapping
@@ -782,25 +789,8 @@ async fn streaming_handler_inner(
             let encoding = stream_config.encoding.clone().unwrap_or_default(); // "aws-event-stream" or empty for SSE
             let is_raw_frame = stream_config.frame_format.as_deref() == Some("raw");
 
-            let mut trickle_ms = state.config.chaos.trickle_ms;
-            let mut disconnect_pct = state.config.chaos.disconnect_pct;
-
-            // Header Overrides for Streaming Chaos
-            if let Some(val) = headers.get("x-vidai-chaos-trickle") {
-                if let Ok(ms) = val.to_str().unwrap_or_default().parse::<u64>() {
-                    trickle_ms = ms;
-                }
-            }
-            if let Some(val) = headers.get("x-vidai-chaos-disconnect") {
-                if let Ok(pct) = val.to_str().unwrap_or_default().parse::<f64>() {
-                    disconnect_pct = pct;
-                }
-            }
-
-            // Use 20ms default if no trickle configured, to ensure *some* streaming effect
-            if trickle_ms == 0 {
-                trickle_ms = 20;
-            }
+            let (trickle_ms, disconnect_pct) =
+                streaming_chaos_defaults(&resolution.tenant, &headers);
 
             let registry_inner = registry.clone();
             let (stream_status, stream_source) = resolve_status_code(
@@ -1241,7 +1231,7 @@ pub async fn echo_handler(
     };
 
     // Apply latency simulation (consistent with mock_handler)
-    apply_latency(&state.config, &headers).await;
+    apply_latency(&resolution.tenant.latency, &headers).await;
 
     let mut response = Response::new(axum::body::Body::from(body));
     response.headers_mut().insert(

@@ -296,6 +296,28 @@ impl Default for ChaosConfig {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_test_dir(name: &str) -> PathBuf {
+        std::env::current_dir().unwrap().join(format!(
+            "target/{}_{}",
+            name,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn write_tenant_metadata(base_dir: &PathBuf, tenant_dir: &str, body: &str) {
+        let metadata_path = base_dir
+            .join("tenants")
+            .join(tenant_dir)
+            .join("tenant.toml");
+        fs::create_dir_all(metadata_path.parent().unwrap()).unwrap();
+        fs::write(metadata_path, body).unwrap();
+    }
 
     #[test]
     fn test_cli_port_override() {
@@ -351,7 +373,7 @@ mod tests {
 
         assert_eq!(config.tenancy.mode, crate::tenancy::TenancyMode::Single);
         assert_eq!(
-            config.tenancy.schema_roots(&config.config_dir),
+            config.tenancy.schema_roots(&config.config_dir).unwrap(),
             vec![crate::tenancy::TenantSchema {
                 tenant_id: None,
                 root_dir: PathBuf::from("config"),
@@ -361,28 +383,39 @@ mod tests {
 
     #[test]
     fn test_multi_tenancy_mode_uses_tenants_schema() {
-        let temp_path = std::env::current_dir()
-            .unwrap()
-            .join("target/test_multi_tenancy_mode.toml");
-
-        std::fs::create_dir_all(temp_path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &temp_path,
+        let temp_base = unique_test_dir("test_multi_tenancy_mode");
+        let temp_path = temp_base.join("mock-server.toml");
+        let tenants_dir = temp_base.join("tenants");
+        write_tenant_metadata(
+            &temp_base,
+            "acme",
             r#"
+id = "acme"
+"#,
+        );
+        write_tenant_metadata(
+            &temp_base,
+            "globex",
+            r#"
+id = "globex"
+"#,
+        );
+
+        fs::create_dir_all(temp_path.parent().unwrap()).unwrap();
+        fs::write(
+            &temp_path,
+            format!(
+                r#"
 port = 8100
 workers = 4
 log_level = "info"
 
 [tenancy]
 mode = "multi"
-tenants_dir = "tenants"
-
-[[tenancy.tenants]]
-id = "acme"
-
-[[tenancy.tenants]]
-id = "globex"
+tenants_dir = "{}"
 "#,
+                tenants_dir.display()
+            ),
         )
         .unwrap();
 
@@ -391,93 +424,117 @@ id = "globex"
 
         assert_eq!(config.tenancy.mode, crate::tenancy::TenancyMode::Multi);
         assert_eq!(
-            config.tenancy.schema_roots(&config.config_dir),
+            config.tenancy.schema_roots(&config.config_dir).unwrap(),
             vec![
                 crate::tenancy::TenantSchema {
                     tenant_id: Some(crate::tenancy::DEFAULT_TENANT_ID.to_string()),
-                    root_dir: PathBuf::from("tenants/default"),
+                    root_dir: tenants_dir.join("default"),
                 },
                 crate::tenancy::TenantSchema {
                     tenant_id: Some("acme".to_string()),
-                    root_dir: PathBuf::from("tenants/acme"),
+                    root_dir: tenants_dir.join("acme"),
                 },
                 crate::tenancy::TenantSchema {
                     tenant_id: Some("globex".to_string()),
-                    root_dir: PathBuf::from("tenants/globex"),
+                    root_dir: tenants_dir.join("globex"),
                 },
             ]
         );
 
-        std::fs::remove_file(temp_path).unwrap();
+        fs::remove_dir_all(temp_base).unwrap();
     }
 
     #[test]
     fn test_duplicate_tenant_ids_fail_validation() {
-        let temp_path = std::env::current_dir()
-            .unwrap()
-            .join("target/test_duplicate_tenant_ids.toml");
-
-        std::fs::create_dir_all(temp_path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &temp_path,
+        let temp_base = unique_test_dir("test_duplicate_tenant_ids");
+        let temp_path = temp_base.join("mock-server.toml");
+        let tenants_dir = temp_base.join("tenants");
+        write_tenant_metadata(
+            &temp_base,
+            "acme",
             r#"
+id = "acme"
+"#,
+        );
+        write_tenant_metadata(
+            &temp_base,
+            "globex-copy",
+            r#"
+id = "acme"
+"#,
+        );
+
+        fs::create_dir_all(temp_path.parent().unwrap()).unwrap();
+        fs::write(
+            &temp_path,
+            format!(
+                r#"
 port = 8100
 workers = 4
 log_level = "info"
 
 [tenancy]
 mode = "multi"
-
-[[tenancy.tenants]]
-id = "acme"
-
-[[tenancy.tenants]]
-id = "acme"
+tenants_dir = "{}"
 "#,
+                tenants_dir.display()
+            ),
         )
         .unwrap();
 
         let args = Cli::parse_from(&["mock-server", "--config", temp_path.to_str().unwrap()]);
         let error = AppConfig::build_config(args).unwrap_err();
 
-        assert!(error.to_string().contains("duplicate tenancy tenant id"));
+        assert!(error.to_string().contains("duplicate tenant id"));
 
-        std::fs::remove_file(temp_path).unwrap();
+        fs::remove_dir_all(temp_base).unwrap();
     }
 
     #[test]
     fn test_ambiguous_tenant_key_matches_fail_validation() {
-        let temp_path = std::env::current_dir()
-            .unwrap()
-            .join("target/test_ambiguous_tenant_keys.toml");
-
-        std::fs::create_dir_all(temp_path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &temp_path,
+        let temp_base = unique_test_dir("test_ambiguous_tenant_keys");
+        let temp_path = temp_base.join("mock-server.toml");
+        let tenants_dir = temp_base.join("tenants");
+        write_tenant_metadata(
+            &temp_base,
+            "acme",
             r#"
+id = "acme"
+
+[[keys]]
+source = "header"
+name = "X-Tenant"
+value = "shared"
+"#,
+        );
+        write_tenant_metadata(
+            &temp_base,
+            "globex",
+            r#"
+id = "globex"
+
+[[keys]]
+source = "header"
+name = "x-tenant"
+value = "shared"
+"#,
+        );
+
+        fs::create_dir_all(temp_path.parent().unwrap()).unwrap();
+        fs::write(
+            &temp_path,
+            format!(
+                r#"
 port = 8100
 workers = 4
 log_level = "info"
 
 [tenancy]
 mode = "multi"
-
-[[tenancy.tenants]]
-id = "acme"
-
-[[tenancy.tenants.keys]]
-source = "header"
-name = "X-Tenant"
-value = "shared"
-
-[[tenancy.tenants]]
-id = "globex"
-
-[[tenancy.tenants.keys]]
-source = "header"
-name = "x-tenant"
-value = "shared"
+tenants_dir = "{}"
 "#,
+                tenants_dir.display()
+            ),
         )
         .unwrap();
 
@@ -486,7 +543,7 @@ value = "shared"
 
         assert!(error.to_string().contains("ambiguous tenant key match"));
 
-        std::fs::remove_file(temp_path).unwrap();
+        fs::remove_dir_all(temp_base).unwrap();
     }
 
     #[test]
@@ -506,21 +563,7 @@ value = "shared"
                     "value": "admin-secret",
                     "value_file": "/tmp/admin.key",
                     "value_env": "ADMIN_KEY"
-                },
-                "tenants": [
-                    {
-                        "id": "acme",
-                        "keys": [
-                            {
-                                "source": "header",
-                                "name": "x-api-key",
-                                "value": "inline-secret",
-                                "value_file": "/tmp/acme.key",
-                                "value_env": "ACME_KEY"
-                            }
-                        ]
-                    }
-                ]
+                }
             },
             "latency": {
                 "mode": "benchmark",
@@ -538,30 +581,16 @@ value = "shared"
         }))
         .unwrap();
 
-        assert_eq!(config.tenancy.tenants[0].keys[0].value, "inline-secret");
         assert_eq!(config.tenancy.admin_auth.header, "x-admin-key");
-        assert_eq!(
-            config.tenancy.tenants[0].keys[0].value_file,
-            Some(PathBuf::from("/tmp/acme.key"))
-        );
-        assert_eq!(
-            config.tenancy.tenants[0].keys[0].value_env.as_deref(),
-            Some("ACME_KEY")
-        );
 
         let serialized = serde_json::to_value(&config).unwrap();
         let admin_auth = &serialized["tenancy"]["admin_auth"];
-        let key = &serialized["tenancy"]["tenants"][0]["keys"][0];
 
         assert_eq!(admin_auth["header"], "x-admin-key");
         assert!(admin_auth.get("value").is_none());
         assert!(admin_auth.get("value_file").is_none());
         assert!(admin_auth.get("value_env").is_none());
-        assert_eq!(key["source"], "header");
-        assert_eq!(key["name"], "x-api-key");
-        assert!(key.get("value").is_none());
-        assert!(key.get("value_file").is_none());
-        assert!(key.get("value_env").is_none());
+        assert!(serialized["tenancy"].get("tenants").is_none());
     }
 
     #[test]

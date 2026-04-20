@@ -23,11 +23,9 @@ mod resolution;
 mod runtime;
 
 pub use config::{
-    AdminAuthConfig, TenancyConfig, TenancyMode, TenantConfig, TenantKeyConfig, TenantKeySource,
-    TenantSchema, DEFAULT_TENANT_ID,
+    AdminAuthConfig, TenancyConfig, TenancyMode, TenantSchema, TenantTemplateMetadata,
+    DEFAULT_TENANT_ID,
 };
 pub use management::{list_tenants, tenant_view, ReloadView};
-pub use resolution::{
-    TenantRequestMetrics, TenantResolution, TenantResolutionError, TenantResolutionRejection,
-};
+pub use resolution::{TenantRequestMetrics, TenantResolution, TenantResolutionError};
 pub use runtime::{build_runtime_store, TenantRuntime, TenantStore, TenantStoreHandle};

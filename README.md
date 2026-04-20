@@ -135,6 +135,26 @@ Single mode is still the simplest path: run the binary, keep your YAML and templ
 
 Multi mode keeps one shared runtime but resolves each accepted request to a tenant before provider matching. Isolation here is logical workspace isolation inside one process, not OS-level or process-level isolation.
 
+In multi mode, `mock-server.toml` keeps the global runtime settings (`mode`, `tenants_dir`, `tenant_header`, global admin auth). Named tenant metadata lives with the tenant itself in `tenants/<id>/tenant.toml`.
+
+Tenant-owned policy can live there too. A tenant can override the global `latency` and `chaos` defaults in its own `tenant.toml`, and accepted requests use the resolved tenant policy before applying any per-request `X-Vidai-*` header overrides.
+
+Tenant metadata can live there as well. Safe fields such as `display_name` and `labels` are exposed to templates as `tenant.display_name` and `tenant.labels`, while tenant auth material stays out of template context.
+
+```toml
+# tenants/acme/tenant.toml
+id = "acme"
+display_name = "Acme Corp"
+
+[labels]
+tier = "gold"
+region = "eu-west"
+```
+
+```json
+{"tenant_id":"{{ tenant.id }}","tenant_name":"{{ tenant.display_name }}","tenant_region":"{{ tenant.labels.region }}"}
+```
+
 ## 🗂️ Directory Layout
 
 Single mode uses the legacy layout:
@@ -149,15 +169,26 @@ Multi mode uses a tenant workspace layout:
 
 ```text
 tenants/
-  default/   # optional: only needed when you want to customize the default tenant
+  default/
+    # tenant.toml optional: only needed for explicit default-tenant metadata
+    providers/
+    templates/
   acme/
+    tenant.toml
+    providers/
+    templates/
   globex/
+    tenant.toml
+    providers/
+    templates/
 ```
 
 Built-ins are always the base layer. The effective runtime is built-ins plus that tenant's own overrides.
 
 - The default tenant always exists internally.
 - `tenants/default/` is only required when you want to override the built-in default tenant behavior.
+- `tenants/default/tenant.toml` is optional and is only needed when the default tenant has explicit metadata of its own.
+- Tenant-owned `latency` and `chaos` settings override the global defaults for that tenant only.
 - Named tenants do not inherit from each other.
 - Named tenants do not inherit from the default tenant.
 - The default tenant is fallback-only when no tenant signal is provided.
@@ -177,6 +208,7 @@ Resolution rules:
 - Header plus key must resolve to the same tenant.
 - No header and no key falls back to the internal default tenant.
 - Unknown tenant, unknown key, or header/key conflict is rejected.
+- In shared multi-tenant mode, the public rejection response is intentionally generic. Internal metrics still keep structured rejection reasons such as unknown tenant, unknown key, missing key, and conflict.
 - Tenant key sources supported in config are `header` and `query`; `host` and `path` are rejected during validation.
 - Accepted requests use tenant-labelled metrics.
 - Rejected requests use separate rejection metrics.
@@ -191,14 +223,18 @@ Global admin endpoints live under `/admin/` and use dedicated admin auth configu
 
 If `tenancy.admin_auth` is unset, `/admin/*` stays closed.
 
-Tenant self-management lives under `/tenant/` and uses tenant auth, not global admin auth.
+Tenant self-management lives under `/tenant/` and uses tenant-admin auth, not global admin auth.
 
 - `GET /tenant`
 - `POST /tenant/reload`
 
-Tenant self-management is scoped to the resolved tenant only. A tenant-admin can inspect or reload its own tenant, but cannot target another tenant by path or input.
+Normal tenant request keys stay on the mock traffic path only. Tenant self-management uses a separate tenant-local `management_auth` secret in `tenants/<id>/tenant.toml`, with `value_file` preferred over `value_env`, and `value_env` preferred over inline `value`.
 
-In single mode there is no tenant-specific auth surface, so `/tenant/*` is closed unless `tenancy.admin_auth` is configured and supplied.
+By default the tenant-admin header is `x-tenant-admin-key`, and it can be overridden per tenant if needed.
+
+Tenant self-management is scoped to the tenant resolved from tenant-admin auth. An optional tenant header may confirm that identity, but it cannot retarget management to another tenant.
+
+In single mode there is no tenant-local management auth surface, so `/tenant/*` stays closed unless global admin auth is intentionally configured and supplied for default-tenant inspection/reload.
 
 ## 🔄 Reload Semantics
 
@@ -212,7 +248,7 @@ In single mode there is no tenant-specific auth surface, so `/tenant/*` is close
 
 `POST /tenant/reload` refreshes only the resolved tenant.
 
-- It rebuilds that tenant's runtime and tenant auth lookup state.
+- It rebuilds that tenant's runtime, request-auth lookup state, and tenant-admin auth state.
 - It does not reload every tenant.
 - Failed tenant reload keeps the previous working tenant state active.
 
@@ -430,7 +466,7 @@ Any endpoint accepts these headers to override behavior per-request:
 
 ## 🎯 Provider Config Reference
 
-Provider YAML files in `config/providers/` define how endpoints match and respond in single mode. In multi mode, tenant overlays live under `tenants/<id>/providers/` and `tenants/<id>/templates/`.
+Provider YAML files in `config/providers/` define how endpoints match and respond in single mode. In multi mode, tenant-owned metadata lives in `tenants/<id>/tenant.toml`, and tenant overlays live under `tenants/<id>/providers/` and `tenants/<id>/templates/`.
 
 ```yaml
 name: "my-provider"

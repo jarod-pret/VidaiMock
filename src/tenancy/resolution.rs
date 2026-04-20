@@ -107,26 +107,22 @@ impl TenantStore {
         }
     }
 
-    pub fn has_explicit_tenant_signal(
+    pub fn resolve_management_request(
         &self,
         headers: &HeaderMap,
-        query_params: &HashMap<String, String>,
-    ) -> bool {
-        headers
-            .get(&self.tenant_header_name)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| !value.trim().is_empty())
-            || self.known_header_key_names.iter().any(|key_name| {
-                headers
-                    .get(key_name)
-                    .and_then(|value| value.to_str().ok())
-                    .is_some_and(|value| !value.trim().is_empty())
-            })
-            || self.known_query_key_names.iter().any(|key_name| {
-                query_params
-                    .get(key_name)
-                    .is_some_and(|value| !value.trim().is_empty())
-            })
+    ) -> Result<TenantResolution, TenantManagementResolutionError> {
+        if self.mode == TenancyMode::Single {
+            return Ok(self.accept(self.default_tenant()));
+        }
+
+        let tenant = self.resolve_management_auth_tenant(headers)?;
+        if let Some(signaled_tenant_id) = self.resolve_optional_management_tenant_signal(headers)? {
+            if signaled_tenant_id != tenant.label {
+                return Err(TenantManagementResolutionError::Conflict);
+            }
+        }
+
+        Ok(self.accept(tenant))
     }
 
     fn accept(&self, tenant: Arc<TenantRuntime>) -> TenantResolution {
@@ -164,6 +160,61 @@ impl TenantStore {
             .ok_or(TenantResolutionError {
                 rejection: TenantResolutionRejection::UnknownTenant,
             })
+    }
+
+    fn resolve_management_auth_tenant(
+        &self,
+        headers: &HeaderMap,
+    ) -> Result<Arc<TenantRuntime>, TenantManagementResolutionError> {
+        let mut matched_tenant = None;
+
+        for tenant in self.management_auth_candidates() {
+            let Some(expected_secret) = tenant.management_auth_secret.as_deref() else {
+                continue;
+            };
+
+            let Some(provided) = headers
+                .get(tenant.management_auth_header.as_str())
+                .and_then(|value| value.to_str().ok())
+            else {
+                continue;
+            };
+
+            if management_secret_matches(
+                tenant.management_auth_header.as_str(),
+                provided.trim(),
+                expected_secret,
+            ) {
+                if matched_tenant
+                    .as_ref()
+                    .is_some_and(|existing: &Arc<TenantRuntime>| existing.label != tenant.label)
+                {
+                    return Err(TenantManagementResolutionError::Conflict);
+                }
+
+                matched_tenant = Some(tenant);
+            }
+        }
+
+        matched_tenant.ok_or(TenantManagementResolutionError::Unauthorized)
+    }
+
+    fn resolve_optional_management_tenant_signal(
+        &self,
+        headers: &HeaderMap,
+    ) -> Result<Option<String>, TenantManagementResolutionError> {
+        if headers.get(&self.tenant_header_name).is_none() {
+            return Ok(None);
+        }
+
+        self.resolve_header_tenant(headers)
+            .map_err(|_| TenantManagementResolutionError::Unauthorized)
+    }
+
+    fn management_auth_candidates(&self) -> Vec<Arc<TenantRuntime>> {
+        let mut candidates = vec![self.default_tenant()];
+        candidates.extend(self.tenants_by_id.values().cloned());
+        candidates
     }
 
     fn resolve_key_tenant(
@@ -222,6 +273,36 @@ impl TenantStore {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TenantManagementResolutionError {
+    Unauthorized,
+    Conflict,
+}
+
+fn management_secret_matches(header_name: &str, provided: &str, expected_secret: &str) -> bool {
+    constant_time_eq_str(provided, expected_secret)
+        || (header_name.eq_ignore_ascii_case("authorization")
+            && provided
+                .strip_prefix("Bearer ")
+                .or_else(|| provided.strip_prefix("bearer "))
+                .is_some_and(|value| constant_time_eq_str(value.trim(), expected_secret)))
+}
+
+fn constant_time_eq_str(left: &str, right: &str) -> bool {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    let max_len = left.len().max(right.len());
+    let mut diff = left.len() ^ right.len();
+
+    for index in 0..max_len {
+        let left_byte = left.get(index).copied().unwrap_or_default();
+        let right_byte = right.get(index).copied().unwrap_or_default();
+        diff |= usize::from(left_byte ^ right_byte);
+    }
+
+    diff == 0
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ResolvedRequestKey {
     pub source: TenantKeySource,
@@ -260,16 +341,27 @@ fn request_key_variants(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{ChaosConfig, LatencyConfig};
     use crate::provider::ProviderRegistry;
-    use crate::tenancy::config::{AdminAuthConfig, TenancyConfig, TenantConfig, TenantKeyConfig};
+    use crate::tenancy::config::{
+        AdminAuthConfig, TenancyConfig, TenantConfig, TenantKeyConfig, TenantTemplateMetadata,
+    };
     use std::collections::HashMap;
     use std::path::PathBuf;
 
     fn build_test_store(tenants: Vec<TenantConfig>) -> TenantStore {
         let default_runtime = Arc::new(TenantRuntime {
             label: "default".to_string(),
+            template_metadata: TenantTemplateMetadata {
+                id: "default".to_string(),
+                ..TenantTemplateMetadata::default()
+            },
             registry: Arc::new(ProviderRegistry::new()),
             requires_key: false,
+            management_auth_header: "x-tenant-admin-key".to_string(),
+            management_auth_secret: None,
+            latency: LatencyConfig::default(),
+            chaos: ChaosConfig::default(),
         });
 
         let tenancy = TenancyConfig {
@@ -277,7 +369,6 @@ mod tests {
             tenants_dir: PathBuf::from("tenants"),
             tenant_header: "x-tenant".to_string(),
             admin_auth: AdminAuthConfig::default(),
-            tenants,
         };
 
         let mut tenants_by_id = HashMap::new();
@@ -286,12 +377,23 @@ mod tests {
         let mut known_header_key_names = HashSet::new();
         let mut known_query_key_names = HashSet::new();
 
-        for tenant in &tenancy.tenants {
+        for tenant in &tenants {
             let requires_key = tenant.requires_key(&tenancy.normalized_tenant_header());
             let runtime = Arc::new(TenantRuntime {
                 label: tenant.id.clone(),
+                template_metadata: tenant.template_metadata(),
                 registry: Arc::new(ProviderRegistry::new()),
                 requires_key,
+                management_auth_header: tenant
+                    .management_auth
+                    .as_ref()
+                    .map(|config| config.header.to_ascii_lowercase())
+                    .unwrap_or_else(|| "x-tenant-admin-key".to_string()),
+                management_auth_secret: tenant.management_auth.as_ref().and_then(|config| {
+                    (!config.value.trim().is_empty()).then(|| config.value.clone())
+                }),
+                latency: LatencyConfig::default(),
+                chaos: ChaosConfig::default(),
             });
 
             tenants_by_id.insert(tenant.id.clone(), runtime);
@@ -332,6 +434,8 @@ mod tests {
             TenancyMode::Multi,
             PathBuf::from("config"),
             tenancy.clone(),
+            LatencyConfig::default(),
+            ChaosConfig::default(),
             tenancy.admin_auth.header.clone(),
             None,
             tenancy.normalized_tenant_header(),
@@ -349,6 +453,7 @@ mod tests {
         let store = build_test_store(vec![TenantConfig {
             id: "acme".to_string(),
             keys: Vec::new(),
+            ..Default::default()
         }]);
 
         let mut headers = HeaderMap::new();
@@ -369,6 +474,7 @@ mod tests {
                 value_file: None,
                 value_env: None,
             }],
+            ..Default::default()
         }]);
 
         let mut headers = HeaderMap::new();
@@ -389,6 +495,7 @@ mod tests {
                 value_file: None,
                 value_env: None,
             }],
+            ..Default::default()
         }]);
 
         let mut headers = HeaderMap::new();
@@ -411,6 +518,7 @@ mod tests {
                     value_file: None,
                     value_env: None,
                 }],
+                ..Default::default()
             },
             TenantConfig {
                 id: "globex".to_string(),
@@ -421,6 +529,7 @@ mod tests {
                     value_file: None,
                     value_env: None,
                 }],
+                ..Default::default()
             },
         ]);
 
@@ -440,6 +549,7 @@ mod tests {
         let store = build_test_store(vec![TenantConfig {
             id: "acme".to_string(),
             keys: Vec::new(),
+            ..Default::default()
         }]);
 
         let mut headers = HeaderMap::new();
@@ -463,6 +573,7 @@ mod tests {
                 value_file: None,
                 value_env: None,
             }],
+            ..Default::default()
         }]);
 
         let mut headers = HeaderMap::new();
@@ -480,6 +591,7 @@ mod tests {
         let store = build_test_store(vec![TenantConfig {
             id: "acme".to_string(),
             keys: Vec::new(),
+            ..Default::default()
         }]);
 
         let resolved = store
@@ -499,6 +611,7 @@ mod tests {
                 value_file: None,
                 value_env: None,
             }],
+            ..Default::default()
         }]);
 
         let mut headers = HeaderMap::new();
