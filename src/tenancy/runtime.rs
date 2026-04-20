@@ -247,7 +247,6 @@ fn reload_multi_mode_tenant(
     tenant_id: &str,
 ) -> Result<Arc<TenantStore>, Box<dyn Error>> {
     let tenancy = &current.tenancy;
-    tenancy.validate()?;
     let tenant_header = tenancy.normalized_tenant_header();
     let mut tenants_by_id = current.tenants_by_id.clone();
     let default_tenant = if tenant_id == DEFAULT_TENANT_ID {
@@ -263,9 +262,8 @@ fn reload_multi_mode_tenant(
             .tenant_config(tenant_id)
             .ok_or_else(|| format!("unknown tenant '{}'", tenant_id))?;
         let runtime = build_named_tenant_runtime(tenancy, tenant_config, &tenant_header)?;
-        tenants_by_id.insert(tenant_id.to_string(), runtime);
 
-        refresh_tenant_lookup_entries(
+        validate_and_refresh_tenant_lookup_entries(
             tenancy,
             tenant_config,
             tenant_id,
@@ -273,6 +271,8 @@ fn reload_multi_mode_tenant(
             &mut header_lookup,
             &mut key_lookup,
         )?;
+
+        tenants_by_id.insert(tenant_id.to_string(), runtime);
     }
 
     let (known_header_key_names, known_query_key_names) = collect_known_key_names(&key_lookup);
@@ -351,7 +351,7 @@ fn build_lookup_state(
     })
 }
 
-fn refresh_tenant_lookup_entries(
+fn validate_and_refresh_tenant_lookup_entries(
     tenancy: &TenancyConfig,
     tenant: &TenantConfig,
     tenant_id: &str,

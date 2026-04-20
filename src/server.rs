@@ -959,6 +959,87 @@ value = "secret-globex"
     }
 
     #[tokio::test]
+    async fn test_models_endpoint_is_tenant_isolated() {
+        let temp_base = management_test_base("test_models_endpoint_tenant_isolation");
+        write_provider(
+            &temp_base.join("tenants/acme/providers/openai.yaml"),
+            r#"{"tenant":"acme"}"#,
+        );
+        write_provider(
+            &temp_base.join("tenants/globex/providers/openai.yaml"),
+            r#"{"tenant":"globex"}"#,
+        );
+
+        fs::write(
+            temp_base.join("tenants/acme/providers/openai.yaml"),
+            r#"
+name: "acme-openai"
+matcher: "^/v1/chat/completions$"
+response_body: '{"tenant":"acme"}'
+priority: 100
+"#,
+        )
+        .unwrap();
+        fs::write(
+            temp_base.join("tenants/globex/providers/openai.yaml"),
+            r#"
+name: "globex-openai"
+matcher: "^/v1/chat/completions$"
+response_body: '{"tenant":"globex"}'
+priority: 100
+"#,
+        )
+        .unwrap();
+
+        let config = multi_tenant_config(&temp_base);
+        let app = create_app(
+            config.clone(),
+            None,
+            Arc::new(TenantStoreHandle::new(
+                build_runtime_store(&config).unwrap(),
+            )),
+        )
+        .await;
+
+        let acme_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/models")
+                    .header("x-tenant", "acme")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(acme_response.status(), StatusCode::OK);
+        let acme_body: serde_json::Value =
+            serde_json::from_str(&response_text(acme_response).await).unwrap();
+        let acme_models = acme_body["data"].to_string();
+        assert!(acme_models.contains("acme-openai"));
+        assert!(!acme_models.contains("globex-openai"));
+
+        let globex_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/models")
+                    .header("x-tenant", "globex")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(globex_response.status(), StatusCode::OK);
+        let globex_body: serde_json::Value =
+            serde_json::from_str(&response_text(globex_response).await).unwrap();
+        let globex_models = globex_body["data"].to_string();
+        assert!(globex_models.contains("globex-openai"));
+        assert!(!globex_models.contains("acme-openai"));
+
+        fs::remove_dir_all(temp_base).unwrap();
+    }
+
+    #[tokio::test]
     async fn test_normal_render_path_includes_resolved_tenant_metadata() {
         let temp_base = management_test_base("test_normal_render_tenant_metadata");
         write_provider(
@@ -1714,6 +1795,171 @@ value = "secret-globex"
             .unwrap();
         assert_eq!(globex_response.status(), StatusCode::OK);
         assert!(response_text(globex_response).await.contains("globex"));
+
+        fs::remove_dir_all(temp_base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_tenant_reload_succeeds_when_other_tenant_secret_source_is_broken() {
+        let temp_base = management_test_base("test_tenant_reload_ignores_other_tenant_secret");
+        write_provider(
+            &temp_base.join("tenants/default/providers/openai.yaml"),
+            r#"{"tenant":"default"}"#,
+        );
+        write_provider(
+            &temp_base.join("tenants/acme/providers/openai.yaml"),
+            r#"{"tenant":"acme-before"}"#,
+        );
+        write_provider(
+            &temp_base.join("tenants/globex/providers/openai.yaml"),
+            r#"{"tenant":"globex"}"#,
+        );
+
+        let mut config = managed_multi_tenant_config(&temp_base);
+        let globex_key_path = temp_base.join("secrets/globex.key");
+        fs::write(&globex_key_path, "secret-globex").unwrap();
+        config.tenancy.tenants[1].keys[0].value.clear();
+        config.tenancy.tenants[1].keys[0].value_file = Some(globex_key_path.clone());
+
+        let app = create_app(
+            config.clone(),
+            None,
+            Arc::new(TenantStoreHandle::new(
+                build_runtime_store(&config).unwrap(),
+            )),
+        )
+        .await;
+
+        write_provider(
+            &temp_base.join("tenants/acme/providers/openai.yaml"),
+            r#"{"tenant":"acme-after"}"#,
+        );
+        fs::remove_file(&globex_key_path).unwrap();
+
+        let reload = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/tenant/reload")
+                    .header("x-api-key", "secret-acme")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reload.status(), StatusCode::OK);
+
+        let acme_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("x-api-key", "secret-acme")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(response_text(acme_response).await.contains("acme-after"));
+
+        let globex_response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("x-api-key", "secret-globex")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(globex_response.status(), StatusCode::OK);
+        assert!(response_text(globex_response).await.contains("globex"));
+
+        fs::remove_dir_all(temp_base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_tenant_reload_succeeds_when_admin_auth_secret_source_is_broken() {
+        let temp_base = management_test_base("test_tenant_reload_ignores_admin_auth_secret");
+        write_provider(
+            &temp_base.join("tenants/default/providers/openai.yaml"),
+            r#"{"tenant":"default"}"#,
+        );
+        write_provider(
+            &temp_base.join("tenants/acme/providers/openai.yaml"),
+            r#"{"tenant":"acme-before"}"#,
+        );
+        write_provider(
+            &temp_base.join("tenants/globex/providers/openai.yaml"),
+            r#"{"tenant":"globex"}"#,
+        );
+
+        let mut config = managed_multi_tenant_config(&temp_base);
+        let admin_key_path = temp_base.join("secrets/admin.key");
+        fs::write(&admin_key_path, "global-admin-secret").unwrap();
+        config.tenancy.admin_auth.value.clear();
+        config.tenancy.admin_auth.value_file = Some(admin_key_path.clone());
+
+        let app = create_app(
+            config.clone(),
+            None,
+            Arc::new(TenantStoreHandle::new(
+                build_runtime_store(&config).unwrap(),
+            )),
+        )
+        .await;
+
+        write_provider(
+            &temp_base.join("tenants/acme/providers/openai.yaml"),
+            r#"{"tenant":"acme-after"}"#,
+        );
+        fs::remove_file(&admin_key_path).unwrap();
+
+        let reload = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/tenant/reload")
+                    .header("x-api-key", "secret-acme")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reload.status(), StatusCode::OK);
+
+        let acme_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("x-api-key", "secret-acme")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(response_text(acme_response).await.contains("acme-after"));
+
+        let admin_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/tenants")
+                    .header("x-admin-key", "global-admin-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(admin_response.status(), StatusCode::OK);
 
         fs::remove_dir_all(temp_base).unwrap();
     }
