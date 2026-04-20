@@ -1,0 +1,37 @@
+{#- Gemini streaming final chunk.
+
+    Per real Gemini `streamGenerateContent?alt=sse`, the terminal chunk:
+      - Carries `finishReason: "STOP"`
+      - Carries the full `usageMetadata` block (total token counts)
+      - Carries `safetyRatings` on the candidate
+      - Contains an empty `parts` array (no text delta — the stop signal alone)
+
+    No trailing `[DONE]` sentinel; real Gemini terminates by closing the
+    connection after this frame. -#}
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "safetyRatings": [
+        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "probability": "NEGLIGIBLE"},
+        {"category": "HARM_CATEGORY_HATE_SPEECH", "probability": "NEGLIGIBLE"}
+      ]
+    }
+  ],
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "mock-{{ uuid }}",
+  "usageMetadata": {
+    "candidatesTokenCount": 8,
+    "promptTokenCount": 10,
+    "promptTokensDetails": [
+      {"modality": "TEXT", "tokenCount": 10}
+    ],
+    "thoughtsTokenCount": 22,
+    "totalTokenCount": 40
+  }
+}

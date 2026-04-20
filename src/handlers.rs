@@ -83,12 +83,24 @@ async fn apply_latency(config: &AppConfig, headers: &HeaderMap) {
     }
 }
 
-/// Checks for chaos overrides and returns an error response if chaos triggers.
-fn check_chaos_failure(config: &AppConfig, headers: &HeaderMap) -> Option<Response> {
+/// Result of rolling for chaos: either force a status override (so downstream
+/// rendering picks the error_template), emit a deliberately malformed body,
+/// or pass through.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ChaosOutcome {
+    None,
+    /// Force this status code; downstream will render provider error_template.
+    ForceStatus(u16),
+    /// Emit a malformed (non-JSON) body with HTTP 200.
+    Malformed,
+}
+
+/// Rolls the configured chaos dice and tells the caller what to do.
+/// Returns ChaosOutcome::None when no chaos fires.
+fn roll_chaos(config: &AppConfig, headers: &HeaderMap) -> ChaosOutcome {
     let mut drop_pct = config.chaos.drop_pct;
     let mut malformed_pct = config.chaos.malformed_pct;
 
-    // Header Overrides
     if let Some(val) = headers.get("x-vidai-chaos-drop") {
         if let Ok(val) = val.to_str().unwrap_or_default().parse::<f64>() {
             drop_pct = val.clamp(0.0, 100.0);
@@ -105,60 +117,90 @@ fn check_chaos_failure(config: &AppConfig, headers: &HeaderMap) -> Option<Respon
 
     let mut rng = rand::rng();
 
-    // 1. Connection Drop (HTTP 500)
     if drop_pct > 0.0 && rng.random_bool(drop_pct / 100.0) {
-        return Some(
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Simulated Internal Server Error",
-            )
-                .into_response(),
-        );
+        return ChaosOutcome::ForceStatus(500);
     }
-
-    // 2. Malformed Response
     if malformed_pct > 0.0 && rng.random_bool(malformed_pct / 100.0) {
-        let mut resp = Response::new(axum::body::Body::from(
-            "This is not valid JSON { missing_brace",
-        ));
-        *resp.status_mut() = StatusCode::OK;
-        return Some(resp);
+        return ChaosOutcome::Malformed;
     }
 
-    None
+    ChaosOutcome::None
+}
+
+/// Indicates how the response status was resolved.
+/// `ChaosOverride` means a failure was explicitly injected and the response body
+/// should be rendered from the provider's `error_template` if available.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum StatusSource {
+    /// Default 200 or provider-configured non-error status.
+    Default,
+    /// Status injected by X-Mock-Status header, ?chaos_status query, or
+    /// X-Vidai-Chaos-Drop — consumers should render the error template.
+    ChaosOverride,
 }
 
 /// Resolves the HTTP status code for a response.
-/// Priority: X-Mock-Status header > provider status_code config > 200.
+/// Priority (first match wins):
+///   1. Dice-roll chaos trigger (X-Vidai-Chaos-Drop etc.)
+///   2. X-Mock-Status header (client-controlled)
+///   3. ?chaos_status query param (server-controlled via URL)
+///   4. Provider status_code config (static or Tera-rendered)
+///   5. Default 200
+/// Returns `(status, source)` so callers can distinguish default vs override.
 fn resolve_status_code(
+    chaos: ChaosOutcome,
     headers: &HeaderMap,
+    query_params: &HashMap<String, String>,
     status_code: Option<&str>,
     context: &tera::Context,
     registry: &Arc<ProviderRegistry>,
-) -> StatusCode {
-    // Header override takes precedence — allows any endpoint to return any status
+) -> (StatusCode, StatusSource) {
+    // 1. Chaos dice roll (X-Vidai-Chaos-Drop). Highest precedence so
+    // randomized failure-injection always wins over deterministic config.
+    if let ChaosOutcome::ForceStatus(code) = chaos {
+        if let Ok(status) = StatusCode::from_u16(code) {
+            return (status, StatusSource::ChaosOverride);
+        }
+    }
+
+    // 2. Header override — client-controlled.
     if let Some(val) = headers.get("x-mock-status") {
         if let Ok(code) = val.to_str().unwrap_or_default().parse::<u16>() {
             if let Ok(status) = StatusCode::from_u16(code) {
-                return status;
+                return (status, StatusSource::ChaosOverride);
             }
         }
     }
 
+    // 3. Query-param override — server-controlled via URL registered in a
+    // gateway's provider-config. Lets one URL be "broken" and another
+    // "healthy" without per-request header forwarding.
+    if let Some(val) = query_params.get("chaos_status") {
+        if let Ok(code) = val.parse::<u16>() {
+            if let Ok(status) = StatusCode::from_u16(code) {
+                return (status, StatusSource::ChaosOverride);
+            }
+        }
+    }
+
+    // 4. Provider-configured status_code (static or Tera-rendered).
+    // A value containing either `{{` (expression) or `{%` (statement) is
+    // rendered as Tera; otherwise treated as a literal string.
     match status_code {
-        None => StatusCode::OK,
+        None => (StatusCode::OK, StatusSource::Default),
         Some(raw) => {
-            let code_str = if raw.contains("{{") {
+            let code_str = if raw.contains("{{") || raw.contains("{%") {
                 registry.render_str(raw, context).unwrap_or_default()
             } else {
                 raw.to_string()
             };
-            code_str
+            let status = code_str
                 .trim()
                 .parse::<u16>()
                 .ok()
                 .and_then(|code| StatusCode::from_u16(code).ok())
-                .unwrap_or(StatusCode::OK)
+                .unwrap_or(StatusCode::OK);
+            (status, StatusSource::Default)
         }
     }
 }
@@ -386,9 +428,17 @@ pub async fn mock_handler(
     // Apply latency simulation (with header override support)
     apply_latency(&state.config, &headers).await;
 
-    // Check for chaos failures (500s or Malformed)
-    if let Some(chaos_response) = check_chaos_failure(&state.config, &headers) {
-        return response_with_metrics(chaos_response.into_response(), resolution.metrics);
+    // Roll chaos dice. Result becomes an injected status_code override that
+    // flows through the normal rendering pipeline, so the body gets the
+    // provider's error_template (OpenAI-shape, Anthropic-shape, etc.) instead
+    // of a plain-text 500 that no SDK can parse.
+    let chaos = roll_chaos(&state.config, &headers);
+    if let ChaosOutcome::Malformed = chaos {
+        let mut resp = Response::new(axum::body::Body::from(
+            "This is not valid JSON { missing_brace",
+        ));
+        *resp.status_mut() = StatusCode::OK;
+        return response_with_metrics(resp, resolution.metrics);
     }
 
     // Check for streaming request
@@ -456,9 +506,30 @@ pub async fn mock_handler(
             context.insert(key, &val);
         }
 
-        // Render response
-        // Either from template file or inline body
-        let rendered = if let Some(template_path) = &provider.response_template {
+        // Resolve status before rendering so provider error templates can
+        // switch on the effective status code.
+        let (status, source) = resolve_status_code(
+            chaos,
+            &headers,
+            &query_params,
+            provider.status_code.as_deref(),
+            &context,
+            &registry,
+        );
+        context.insert("status_code", &status.as_u16());
+
+        let is_error_status = status.is_client_error() || status.is_server_error();
+        let _ = source;
+        let chosen_template_path = if is_error_status {
+            provider
+                .error_template
+                .as_deref()
+                .or(provider.response_template.as_deref())
+        } else {
+            provider.response_template.as_deref()
+        };
+
+        let rendered = if let Some(template_path) = chosen_template_path {
             match registry.tera.render(template_path, &context) {
                 Ok(s) => s,
                 Err(e) => {
@@ -495,12 +566,6 @@ pub async fn mock_handler(
             );
         };
 
-        let status = resolve_status_code(
-            &headers,
-            provider.status_code.as_deref(),
-            &context,
-            &registry,
-        );
         let mut response = Response::new(axum::body::Body::from(rendered));
         *response.status_mut() = status;
         response.headers_mut().insert(
@@ -595,6 +660,18 @@ async fn streaming_handler_inner(
     let path = uri.path();
     let registry = resolution.tenant.registry.clone();
 
+    // Streams don't have a natural "streaming error response" — real providers
+    // respond with a non-streaming HTTP error when the upstream fails.
+    // Roll chaos up front; if malformed, return a plain malformed body.
+    let stream_chaos = roll_chaos(&state.config, &headers);
+    if let ChaosOutcome::Malformed = stream_chaos {
+        let mut resp = Response::new(axum::body::Body::from(
+            "This is not valid JSON { missing_brace",
+        ));
+        *resp.status_mut() = StatusCode::OK;
+        return response_with_metrics(resp, resolution.metrics);
+    }
+
     // 1. Try to find provider
     if let Some(provider_ref) = registry.find_provider(path) {
         let provider = provider_ref.clone();
@@ -688,12 +765,45 @@ async fn streaming_handler_inner(
             }
 
             let registry_inner = registry.clone();
-            let stream_status = resolve_status_code(
+            let (stream_status, stream_source) = resolve_status_code(
+                stream_chaos,
                 &headers,
+                &query_params,
                 provider.status_code.as_deref(),
                 &base_context,
                 &registry,
             );
+
+            // If the resolved status is an error, do NOT stream — render the
+            // error template (or response template) non-streamingly, matching
+            // real providers that return HTTP 4xx/5xx with JSON body instead
+            // of an SSE stream when requests are invalid or chaos fires.
+            // Applies both to chaos overrides (VM-005) and provider-configured
+            // validation (VM-007: Anthropic max_tokens missing -> 400).
+            let is_error_status =
+                stream_status.is_client_error() || stream_status.is_server_error();
+            let _ = stream_source; // currently unused; kept for future splits
+            if is_error_status {
+                base_context.insert("status_code", &stream_status.as_u16());
+                let chosen_template = provider
+                    .error_template
+                    .as_deref()
+                    .or(provider.response_template.as_deref());
+                let body = if let Some(tpl) = chosen_template {
+                    registry.tera.render(tpl, &base_context).unwrap_or_default()
+                } else if let Some(b) = &provider.response_body {
+                    registry.render_str(b, &base_context).unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                let mut resp = Response::new(axum::body::Body::from(body));
+                *resp.status_mut() = stream_status;
+                resp.headers_mut().insert(
+                    axum::http::header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/json"),
+                );
+                return response_with_metrics(resp, resolution.metrics);
+            }
 
             let stream = stream::unfold(
                 (
@@ -830,17 +940,28 @@ async fn streaming_handler_inner(
                                 ),
                             ))
                         } else if is_raw_frame {
-                            // Raw frame mode: emit template output verbatim with trailing newlines.
-                            // Template controls all framing (event: lines, data: lines, etc).
+                            // Raw frame mode: template controls SSE framing.
+                            //
+                            // Preserve blank lines so multi-event templates
+                            // stay split into distinct SSE frames.
                             let mut buf = Vec::new();
+                            let mut prev_blank = false;
                             for line in data.lines() {
-                                let line = line.trim();
-                                if !line.is_empty() {
-                                    buf.extend_from_slice(line.as_bytes());
+                                let trimmed = line.trim();
+                                if trimmed.is_empty() {
+                                    if !prev_blank {
+                                        buf.extend_from_slice(b"\n");
+                                        prev_blank = true;
+                                    }
+                                } else {
+                                    buf.extend_from_slice(trimmed.as_bytes());
                                     buf.extend_from_slice(b"\n");
+                                    prev_blank = false;
                                 }
                             }
-                            buf.extend_from_slice(b"\n");
+                            if !prev_blank {
+                                buf.extend_from_slice(b"\n");
+                            }
                             Some((
                                 Ok::<_, Infallible>(axum::body::Bytes::from(buf)),
                                 (
@@ -1029,20 +1150,34 @@ fn extract_content_value(json_str: &str) -> (serde_json::Value, bool) {
                 }
             }
         }
-        // Anthropic format: content[0].text
+        // Anthropic format: content[0].text OR content[0].type == "tool_use".
+        // A tool_use-first content block is the Anthropic analogue of OpenAI
+        // tool_calls — emit as a single structured chunk so the streaming
+        // template can render it as a typed content_block_start/delta rather
+        // than word-chunking the entire JSON body as text.
         if let Some(content) = json.get("content").and_then(|c| c.as_array()) {
             if let Some(first_block) = content.get(0) {
+                if first_block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
+                    return (first_block.clone(), true);
+                }
                 if let Some(text) = first_block.get("text") {
                     return (text.clone(), false);
                 }
             }
         }
-        // Gemini/Vertex format: candidates[0].content.parts[0].text
+        // Gemini/Vertex format: candidates[0].content.parts[0] is either
+        // `{text: ...}` (text response) or `{functionCall: ...}` (tool call).
+        // functionCall goes down the same "single structured chunk" path as
+        // OpenAI tool_calls / Anthropic tool_use so streaming doesn't try to
+        // word-chunk the JSON body.
         if let Some(candidates) = json.get("candidates").and_then(|c| c.as_array()) {
             if let Some(first_candidate) = candidates.get(0) {
                 if let Some(content) = first_candidate.get("content") {
                     if let Some(parts) = content.get("parts").and_then(|p| p.as_array()) {
                         if let Some(first_part) = parts.get(0) {
+                            if first_part.get("functionCall").is_some() {
+                                return (first_part.clone(), true);
+                            }
                             if let Some(text) = first_part.get("text") {
                                 return (text.clone(), false);
                             }

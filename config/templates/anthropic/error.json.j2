@@ -1,0 +1,39 @@
+{#- Anthropic-shape error envelope.
+    Real Anthropic errors look like:
+      {"type":"error","error":{"type":"invalid_request_error","message":"..."}}
+    See: https://docs.anthropic.com/en/api/errors
+
+    Picks a provider-accurate message based on what's actually missing or
+    invalid in the request, so SDK tests asserting on error messages
+    (e.g. 'max_tokens: field required') see the same wire text a real
+    upstream would return. Falls back to a generic message for statuses
+    produced by chaos injection where no specific cause is identifiable. -#}
+{%- set err_type = "invalid_request_error" -%}
+{%- if status_code == 401 -%}{%- set err_type = "authentication_error" -%}
+{%- elif status_code == 403 -%}{%- set err_type = "permission_error" -%}
+{%- elif status_code == 404 -%}{%- set err_type = "not_found_error" -%}
+{%- elif status_code == 429 -%}{%- set err_type = "rate_limit_error" -%}
+{%- elif status_code == 529 -%}{%- set err_type = "overloaded_error" -%}
+{%- elif status_code >= 500 -%}{%- set err_type = "api_error" -%}
+{%- endif -%}
+{%- set code = status_code | default(value=500) -%}
+{%- set err_msg = "Mock error response (HTTP " ~ code ~ ")." -%}
+{%- if status_code == 400 -%}
+  {%- set max_tokens = json.max_tokens | default(value=0) -%}
+  {%- set messages = json.messages | default(value="") -%}
+  {%- set model = json.model | default(value="") -%}
+  {%- if not max_tokens -%}
+    {%- set err_msg = "max_tokens: Field required" -%}
+  {%- elif not messages -%}
+    {%- set err_msg = "messages: Field required" -%}
+  {%- elif not model -%}
+    {%- set err_msg = "model: Field required" -%}
+  {%- endif -%}
+{%- endif -%}
+{
+  "type": "error",
+  "error": {
+    "type": "{{ err_type }}",
+    "message": "{{ err_msg }}"
+  }
+}

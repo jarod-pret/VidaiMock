@@ -6,14 +6,18 @@ name: gemini
 matcher: "^/v1(beta)?/models/[^:]+:(generate|streamGenerate)Content$"
 request_mapping:
   model: "gemini-2.5-flash"
+error_template: "gemini/error.json.j2"
 stream:
   enabled: true
   lifecycle:
+    # Intermediate chunks: text delta only, finishReason=null, no usageMetadata.
+    # Matches real Gemini streamGenerateContent?alt=sse wire behaviour.
     on_chunk:
-      # Gemini sends a standard array of candidates per chunk
-      template_path: "gemini/response.json.j2"
+      template_path: "gemini/stream_chunk.json.j2"
+    # Final chunk: finishReason=STOP + usageMetadata (one emission at end).
+    # Real Gemini puts the terminal signal here only; prior chunks stay open.
     on_stop:
-      template_body: "[DONE]"
-  # Wrap responses in SSE data: prefix
+      template_path: "gemini/stream_final.json.j2"
+  # Default SSE wrapping: `data: {{ chunk }}\n\n` per line.
   format: "{{ chunk }}"
 response_template: "gemini/response.json.j2"

@@ -1,6 +1,15 @@
 name: "anthropic"
 matcher: "^/v1/messages(/stream)?$"
 response_template: "anthropic/message.json.j2"
+error_template: "anthropic/error.json.j2"
+# VM-007: reject requests missing required fields with 400, matching real
+# Anthropic validation. Order of checks mirrors the error template's reason
+# detection so status and body stay consistent.
+#
+# Note: Tera's `is defined` is unreliable against serde_json::Value — any
+# present truthy value (positive int for max_tokens, non-empty array for
+# messages, non-empty string for model) is what real Anthropic requires.
+status_code: "{% if json.max_tokens %}200{% else %}400{% endif %}"
 stream:
   enabled: true
   frame_format: raw

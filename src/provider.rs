@@ -50,6 +50,12 @@ pub struct ProviderConfig {
     /// HTTP status code to return (default: 200). Supports static codes ("400")
     /// or Tera expressions ("{{ path_segments | last }}") for dynamic extraction.
     pub status_code: Option<String>,
+    /// Optional template rendered when a chaos/failure override triggers an error
+    /// response (e.g. `?chaos_status=500` query param, `X-Vidai-Chaos-Drop`).
+    /// Falls back to the standard `response_template` when absent.
+    /// Lets providers supply provider-shaped error envelopes
+    /// (OpenAI: `{"error": {...}}`, Anthropic: `{"type": "error", ...}`, etc.).
+    pub error_template: Option<String>,
     /// Priority for matching (higher matches first)
     #[serde(default)]
     pub priority: i32,
@@ -161,6 +167,74 @@ impl ProviderRegistry {
                 let max = args.get("max").and_then(|v| v.as_f64()).unwrap_or(1.0);
                 let val = rand::rng().random_range(min..=max);
                 Ok(tera::Value::from(val))
+            },
+        );
+
+        // has_tool_result(messages=json.messages, provider="openai") -> bool
+        //
+        // Detects whether the request's conversation history already contains a
+        // tool result. Templates use this to terminate agentic tool-calling
+        // loops: when a tool result is in the history, emit a plain-text
+        // synthesis instead of another tool_calls response (which would loop
+        // forever).
+        //
+        // Done in Rust rather than Tera because deep JSON-array inspection
+        // (e.g. looking inside `content` arrays of objects) is unreliable from
+        // Tera expressions — we'd need `.` traversal through arrays of mixed
+        // types. A native Rust check is both faster and more robust.
+        //
+        // Provider-specific shapes recognised:
+        //   openai    — message with role=="tool"
+        //   anthropic — user message whose content array contains type=="tool_result"
+        //   gemini    — user content whose parts array contains a functionResponse key
+        //
+        // Returns false (not an error) on missing/null/malformed inputs so
+        // template logic stays branchable without defensive filters.
+        tera.register_function(
+            "has_tool_result",
+            |args: &HashMap<String, tera::Value>| -> tera::Result<tera::Value> {
+                let messages = match args.get("messages") {
+                    Some(tera::Value::Array(a)) => a,
+                    _ => return Ok(tera::Value::Bool(false)),
+                };
+                let provider = args
+                    .get("provider")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("openai");
+
+                let found = messages.iter().any(|msg| match provider {
+                    "openai" => {
+                        // tool-role message anywhere signals a prior tool_call was answered.
+                        msg.get("role").and_then(|r| r.as_str()) == Some("tool")
+                    }
+                    "anthropic" => {
+                        // user message carrying a tool_result content block.
+                        let is_user = msg.get("role").and_then(|r| r.as_str()) == Some("user");
+                        let has_block = msg
+                            .get("content")
+                            .and_then(|c| c.as_array())
+                            .map(|blocks| {
+                                blocks.iter().any(|b| {
+                                    b.get("type").and_then(|t| t.as_str()) == Some("tool_result")
+                                })
+                            })
+                            .unwrap_or(false);
+                        is_user && has_block
+                    }
+                    "gemini" => {
+                        // user content whose parts array includes a functionResponse.
+                        let is_user = msg.get("role").and_then(|r| r.as_str()) == Some("user");
+                        let has_fr = msg
+                            .get("parts")
+                            .and_then(|p| p.as_array())
+                            .map(|parts| parts.iter().any(|p| p.get("functionResponse").is_some()))
+                            .unwrap_or(false);
+                        is_user && has_fr
+                    }
+                    _ => false,
+                });
+
+                Ok(tera::Value::Bool(found))
             },
         );
 
@@ -416,5 +490,263 @@ response_template: "openai/chat.json.j2"
 
         // Clean up
         fs::remove_dir_all(temp_base).unwrap();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // has_tool_result() regression suite — VM-009 (agentic loop termination)
+    //
+    // These tests exercise the Tera custom function through the exact same
+    // code path that templates use. Each test constructs a request JSON,
+    // renders a one-off Tera template that calls has_tool_result(), and
+    // asserts on the rendered output. This covers:
+    //   1. All three provider shapes (OpenAI tool role, Anthropic
+    //      tool_result content block, Gemini functionResponse part).
+    //   2. Array-index access — the known-flaky Tera concern. We stress
+    //      messages with varying length, mixed types, empty arrays, and
+    //      null/missing fields to prove the helper tolerates them all.
+    //   3. Defensive behaviour: malformed input returns `false`, not an
+    //      error, so template branching stays robust.
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Spin up a test Tera instance with only the helper registered, so
+    /// these tests don't depend on the bundled provider templates loading.
+    fn test_tera_with_helper() -> Tera {
+        let mut registry = ProviderRegistry::new();
+        registry
+            .load_from_dir(&PathBuf::from("non_existent_dir_for_helper_tests"))
+            .unwrap();
+        (*registry.tera).clone()
+    }
+
+    /// Convenience: render `{{ has_tool_result(messages=..., provider=...) }}`
+    /// against a given messages array and provider, return the rendered string.
+    fn eval_helper(messages: &serde_json::Value, provider: &str) -> String {
+        let mut ctx = tera::Context::new();
+        ctx.insert("messages", messages);
+        ctx.insert("provider_name", provider);
+        // one_off uses a fresh Tera instance without our registered helpers,
+        // so we add the template to our pre-built instance and render from it.
+        let mut tera = test_tera_with_helper();
+        tera.add_raw_template(
+            "__helper_test__",
+            r#"{{ has_tool_result(messages=messages, provider=provider_name) }}"#,
+        )
+        .unwrap();
+        tera.render("__helper_test__", &ctx)
+            .unwrap_or_else(|e| panic!("render failed: {e}"))
+    }
+
+    // ─── OpenAI shape ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_has_tool_result_openai_detects_tool_role_message() {
+        let msgs = serde_json::json!([
+            {"role": "user", "content": "What is the weather?"},
+            {"role": "assistant", "tool_calls": [{"id": "t1", "function": {"name": "get_weather"}}]},
+            {"role": "tool", "tool_call_id": "t1", "content": "15°C cloudy"}
+        ]);
+        assert_eq!(eval_helper(&msgs, "openai"), "true");
+    }
+
+    #[test]
+    fn test_has_tool_result_openai_no_tool_role_returns_false() {
+        let msgs = serde_json::json!([
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi!"}
+        ]);
+        assert_eq!(eval_helper(&msgs, "openai"), "false");
+    }
+
+    #[test]
+    fn test_has_tool_result_openai_tool_role_anywhere_triggers() {
+        // Tool role in position 0 should still trigger (defensive).
+        let msgs = serde_json::json!([
+            {"role": "tool", "tool_call_id": "t0", "content": "X"},
+            {"role": "user", "content": "follow-up"}
+        ]);
+        assert_eq!(eval_helper(&msgs, "openai"), "true");
+    }
+
+    // ─── Anthropic shape ────────────────────────────────────────────────
+
+    #[test]
+    fn test_has_tool_result_anthropic_detects_tool_result_block() {
+        let msgs = serde_json::json!([
+            {"role": "user", "content": "Weather?"},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "t1", "name": "get_weather", "input": {}}
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "15°C"}
+            ]}
+        ]);
+        assert_eq!(eval_helper(&msgs, "anthropic"), "true");
+    }
+
+    #[test]
+    fn test_has_tool_result_anthropic_string_content_no_match() {
+        // Anthropic allows string content for user messages — must not falsely match.
+        let msgs = serde_json::json!([
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi"}
+        ]);
+        assert_eq!(eval_helper(&msgs, "anthropic"), "false");
+    }
+
+    #[test]
+    fn test_has_tool_result_anthropic_assistant_with_tool_use_alone_no_match() {
+        // Only assistant tool_use blocks, no user tool_result yet — loop should continue.
+        let msgs = serde_json::json!([
+            {"role": "user", "content": "Weather?"},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "t1", "name": "get_weather", "input": {}}
+            ]}
+        ]);
+        assert_eq!(eval_helper(&msgs, "anthropic"), "false");
+    }
+
+    #[test]
+    fn test_has_tool_result_anthropic_mixed_content_types() {
+        // Content block array with mixed types; the tool_result block must
+        // be detected regardless of position.
+        let msgs = serde_json::json!([
+            {"role": "user", "content": [
+                {"type": "text", "text": "Note:"},
+                {"type": "tool_result", "tool_use_id": "t1", "content": "value"},
+                {"type": "text", "text": "End."}
+            ]}
+        ]);
+        assert_eq!(eval_helper(&msgs, "anthropic"), "true");
+    }
+
+    // ─── Gemini shape ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_has_tool_result_gemini_detects_function_response_part() {
+        let msgs = serde_json::json!([
+            {"role": "user", "parts": [{"text": "Weather?"}]},
+            {"role": "model", "parts": [{"functionCall": {"name": "get_weather", "args": {}}}]},
+            {"role": "user", "parts": [{"functionResponse": {"name": "get_weather", "response": {"temp": 15}}}]}
+        ]);
+        assert_eq!(eval_helper(&msgs, "gemini"), "true");
+    }
+
+    #[test]
+    fn test_has_tool_result_gemini_text_only_no_match() {
+        let msgs = serde_json::json!([
+            {"role": "user", "parts": [{"text": "Hello"}]},
+            {"role": "model", "parts": [{"text": "Hi"}]}
+        ]);
+        assert_eq!(eval_helper(&msgs, "gemini"), "false");
+    }
+
+    #[test]
+    fn test_has_tool_result_gemini_functionresponse_on_model_role_no_match() {
+        // functionResponse on a non-user role doesn't count (real Gemini only
+        // puts tool results in user messages). Defensive check.
+        let msgs = serde_json::json!([
+            {"role": "model", "parts": [{"functionResponse": {"name": "x", "response": {}}}]}
+        ]);
+        assert_eq!(eval_helper(&msgs, "gemini"), "false");
+    }
+
+    // ─── Tera array-index edge cases (the user's explicit ask) ──────────
+
+    #[test]
+    fn test_has_tool_result_handles_empty_messages_array() {
+        assert_eq!(eval_helper(&serde_json::json!([]), "openai"), "false");
+        assert_eq!(eval_helper(&serde_json::json!([]), "anthropic"), "false");
+        assert_eq!(eval_helper(&serde_json::json!([]), "gemini"), "false");
+    }
+
+    #[test]
+    fn test_has_tool_result_handles_very_long_messages_array() {
+        // Stress test: a 200-message history with the tool result near the end.
+        let mut arr: Vec<serde_json::Value> = (0..199)
+            .map(|i| serde_json::json!({"role": "user", "content": format!("msg {i}")}))
+            .collect();
+        arr.push(serde_json::json!({"role": "tool", "content": "final tool result"}));
+        assert_eq!(eval_helper(&serde_json::json!(arr), "openai"), "true");
+    }
+
+    #[test]
+    fn test_has_tool_result_handles_non_array_input() {
+        // Tera templates might pass scalar/null when json.messages is absent.
+        // Should return false, not error.
+        let mut ctx = tera::Context::new();
+        ctx.insert("messages", &serde_json::Value::Null);
+        ctx.insert("provider_name", &"openai");
+        let mut tera = test_tera_with_helper();
+        tera.add_raw_template(
+            "__null_msgs_test__",
+            "{{ has_tool_result(messages=messages, provider=provider_name) }}",
+        )
+        .unwrap();
+        let rendered = tera
+            .render("__null_msgs_test__", &ctx)
+            .unwrap_or_else(|e| panic!("should not error on null input: {e}"));
+        assert_eq!(rendered, "false");
+    }
+
+    #[test]
+    fn test_has_tool_result_handles_malformed_messages() {
+        // Each element is something other than an object — helper must
+        // tolerate without panicking and return false.
+        let msgs = serde_json::json!(["string element", 42, null, ["nested", "array"]]);
+        assert_eq!(eval_helper(&msgs, "openai"), "false");
+    }
+
+    #[test]
+    fn test_has_tool_result_handles_missing_role_field() {
+        // Objects without a "role" field at all should silently fail the
+        // role check (not raise).
+        let msgs = serde_json::json!([
+            {"content": "no role here"},
+            {"parts": [{"text": "also no role"}]}
+        ]);
+        assert_eq!(eval_helper(&msgs, "openai"), "false");
+        assert_eq!(eval_helper(&msgs, "anthropic"), "false");
+        assert_eq!(eval_helper(&msgs, "gemini"), "false");
+    }
+
+    #[test]
+    fn test_has_tool_result_handles_deeply_nested_tool_result() {
+        // Simulate a real Anthropic tool_result with a nested content array
+        // (the content field of a tool_result can itself be a list of
+        // blocks). Helper must still detect the tool_result by type.
+        let msgs = serde_json::json!([
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": [
+                    {"type": "text", "text": "nested"},
+                    {"type": "image", "source": {"type": "base64", "data": "AAA"}}
+                ]}
+            ]}
+        ]);
+        assert_eq!(eval_helper(&msgs, "anthropic"), "true");
+    }
+
+    #[test]
+    fn test_has_tool_result_unknown_provider_returns_false() {
+        // Defensive: unknown provider name returns false rather than erroring.
+        let msgs = serde_json::json!([{"role": "tool", "content": "x"}]);
+        assert_eq!(eval_helper(&msgs, "martian_ai"), "false");
+    }
+
+    #[test]
+    fn test_has_tool_result_defaults_to_openai_when_provider_omitted() {
+        // If the template author omits `provider=...`, default to openai.
+        let mut ctx = tera::Context::new();
+        ctx.insert(
+            "messages",
+            &serde_json::json!([{"role": "tool", "content": "x"}]),
+        );
+        let mut tera = test_tera_with_helper();
+        tera.add_raw_template(
+            "__default_provider_test__",
+            "{{ has_tool_result(messages=messages) }}",
+        )
+        .unwrap();
+        let rendered = tera.render("__default_provider_test__", &ctx).unwrap();
+        assert_eq!(rendered, "true");
     }
 }

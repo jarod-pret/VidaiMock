@@ -5,7 +5,7 @@
 
 [Home Page](https://Vidai.uk) | [Documentation](https://vidai.uk/docs/mock/intro/)
 
-**Batteries-included mock server for LLM APIs** — works instantly with OpenAI, Anthropic, Gemini, Bedrock, and more. Zero config required.
+**Batteries-included mock server for LLM APIs and agents** — works instantly with OpenAI, Anthropic, Gemini, Bedrock, and more. Run ADK / LangGraph / LangChain agentic workflows against it without a single live-provider token. Zero config required.
 
 ## ⚡ 30-Second Demo
 
@@ -37,7 +37,7 @@ No configuration needed. These providers work immediately:
 | **OpenAI Images** | `/v1/images/generations` | — |
 | **OpenAI Moderations** | `/v1/moderations` | — |
 | **Anthropic** | `/v1/messages` | ✅ (all 7 SSE event types) |
-| **Gemini Generate** | `/v1beta/models/*:generateContent` | ✅ |
+| **Gemini Generate** | `/v1beta/models/*:generateContent` | ✅ (text deltas + terminal `finishReason: STOP` chunk with `usageMetadata`, no `[DONE]`) |
 | **Gemini Embeddings** | `/v1beta/models/*:embedContent` | — |
 | **Gemini Token Count** | `/v1beta/models/*:countTokens` | — |
 | **Gemini Models** | `GET /v1beta/models` | — |
@@ -47,16 +47,19 @@ No configuration needed. These providers work immediately:
 | **Cohere, Mistral, Groq** | OpenAI-compatible | ✅ |
 | **Error Simulator** | `/error/{code}` | — |
 
-Plus: Tool calling (OpenAI `tool_calls` + Anthropic `tool_use` + Gemini `functionCall`), reasoning model tokens, Gemini 2.5 `thoughtsTokenCount`, Anthropic cache/cost fields, and more.
+Plus: Tool calling (OpenAI `tool_calls` + Anthropic `tool_use` + Gemini `functionCall`), **agentic loop termination** (tool-result detection across all three providers — see [Agentic Workflow Testing](#-agentic-workflow-testing)), reasoning model tokens, Gemini 2.5 `thoughtsTokenCount`, Anthropic cache/cost fields, and more.
 
 ## ✨ Key Features
 
 - **🚀 Zero Config / Zero Fixtures**: Single **~7MB binary**, instant startup, no Docker/DB, and zero setup required in default single mode.
 - **🌊 Physics-Accurate Streaming**: Realistic TTFT and token-by-token delivery with **provider-native streaming payloads** (OpenAI SSE, Responses API typed events, Anthropic EventStream, Gemini, etc.)
 - **⚡ High Performance**: 50,000+ RPS in benchmark mode
-- **🎛️ Chaos & Error Testing**: Inject failures, latency, malformed responses, and **custom HTTP status codes** (400, 401, 404, 429, 500, etc.) for error path testing
+- **🎛️ Chaos & Error Testing**: Inject failures, latency, malformed responses, and **custom HTTP status codes** (400, 401, 404, 429, 500, etc.) — every error returns a **provider-shaped JSON envelope** (OpenAI, Anthropic, Gemini)
 - **🧠 Smart Response Branching**: Templates auto-detect tool calls (OpenAI `tool_calls`, Anthropic `tool_use`, Gemini `functionCall`), reasoning models (o-series), structured output, and respond with the correct shape
-- **🎯 Per-Request Overrides**: `X-Mock-Status` header returns any HTTP status on any endpoint — test error paths on real provider routes without path rewriting
+- **🔁 Agentic Loop Termination**: When a tool result is already in the request history (OpenAI `role: tool`, Anthropic `tool_result` block, Gemini `functionResponse` part), the mock switches to plain-text synthesis instead of looping another `tool_call` — ADK/LangGraph/LangChain agentic runs terminate naturally
+- **🎯 Per-Request Overrides**: `X-Mock-Status` header, `?chaos_status=500` URL query, and `X-Vidai-Chaos-*` headers all return real provider error envelopes — test error paths on real provider routes without path rewriting
+- **✅ Request Validation**: Known-required fields are enforced per provider (e.g. Anthropic `/v1/messages` without `max_tokens` → HTTP 400 with correct `invalid_request_error` envelope and a per-field message like `max_tokens: Field required`)
+- **🔬 SDK-Level Wire Accuracy**: Streams survive strict SDK parsers end-to-end — `openai-python`, `anthropic`, `google-genai` all iterate the mock without hand-crafted compat shims. Text streaming, tool-call streaming, and agentic-loop streaming all emit single-line SSE JSON with correct typed events. Regression-tested byte-level against captured real-provider wire format.
 - **📝 Customizable**: YAML configs + Tera templates for any API
 
 ## 🛡️ Built for Vidai.Server
@@ -71,8 +74,47 @@ Unlike tools that just record and replay static data or intercept browser reques
 *   **Truly Dynamic**: Every response is a Tera template. You can reflect request data, generate random IDs, or use complex logic to make your mock feel alive.
 *   **Physics-Accurate**: Emulates real-world network protocols (SSE, EventStream) and silver-level latency.
 *   **Error Path Testing**: Custom HTTP status codes via `status_code` in YAML (static or dynamic) and `X-Mock-Status` request header let you test upstream error handling — 400s, 401s, 404s, 429s, 500s — on any real provider endpoint without path rewriting.
-*   **Smart Branching**: Templates auto-detect OpenAI `tools`/`response_format`/o-series models, Anthropic `tools`, and Gemini `functionDeclarations` from the request and return the correctly shaped response — no per-scenario config needed.
-*   **Typed SSE Streaming**: Beyond plain `data:` chunks — supports OpenAI Responses API typed events (`response.output_text.delta`, etc.), Anthropic's 7-event lifecycle (`content_block_start`, `message_delta`, `ping`, etc.), and `stream_options.include_usage` for final usage chunks.
+*   **Smart Branching**: Templates auto-detect OpenAI `tools`/`response_format`/o-series models, Anthropic `tools`, Gemini `functionDeclarations`, and tool-result presence in the message history — so agentic testing against ADK, LangGraph, and LangChain Runner loops terminates correctly instead of calling the mock forever.
+*   **Typed SSE Streaming**: Beyond plain `data:` chunks — supports OpenAI Responses API typed events (`response.output_text.delta`, etc.), Anthropic's 7-event lifecycle (`content_block_start`, `message_delta`, `ping`, etc.), Gemini's "text-delta chunks + terminal `finishReason` chunk" pattern, and `stream_options.include_usage` for final usage chunks.
+
+### 🤖 Agentic Workflow Testing
+
+Agent frameworks wrap an LLM in a tool-calling loop: **model → tool_call → tool executes → tool_result → model → …**. The loop terminates when the model stops requesting tools and produces a plain-text answer. Naïve mocks can't replicate this — they either always return tool calls (infinite loop) or never return them (breaks tool tests). VidaiMock's bundled chat templates do both, correctly:
+
+- **Tools defined + no tool result yet** → emit a `tool_call` / `tool_use` / `functionCall`
+- **Tools defined + tool result already in history** → emit plain-text synthesis with `finish_reason: "stop"` / `stop_reason: "end_turn"`
+
+The heuristic is a built-in Tera helper, `has_tool_result()`, that inspects the request's conversation history for:
+
+| Provider | Signal |
+|---|---|
+| OpenAI | message with `role: "tool"` |
+| Anthropic | user message whose `content[]` contains `type: "tool_result"` |
+| Gemini | user content whose `parts[]` contains `functionResponse` |
+
+This means you can run **Google ADK, LangGraph, or LangChain Runner loops end-to-end in CI against VidaiMock with zero live-provider spend** — the loop terminates naturally just like it does against real providers. Same heuristic works with custom provider templates; call `has_tool_result(messages=json.messages, provider="openai")` in your own `.j2` files.
+
+Concrete example — the full OpenAI round trip, no API key, no cost:
+
+```bash
+# Turn 1: user asks a question; mock returns a tool_call (because tools are defined).
+curl -s http://localhost:8100/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-4o","tools":[{"type":"function","function":{"name":"get_weather","parameters":{}}}],
+       "messages":[{"role":"user","content":"Weather in London?"}]}'
+# -> finish_reason: "tool_calls", message.tool_calls: [...]
+
+# Your agent executes the tool, appends the result, calls again.
+# Turn 2: same tools, now with a role:tool result in history.
+# Mock detects the tool result, returns plain-text synthesis instead of looping.
+curl -s http://localhost:8100/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-4o","tools":[{"type":"function","function":{"name":"get_weather","parameters":{}}}],
+       "messages":[
+         {"role":"user","content":"Weather in London?"},
+         {"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"get_weather","arguments":"{}"}}]},
+         {"role":"tool","tool_call_id":"c1","content":"15°C cloudy"}
+       ]}'
+# -> finish_reason: "stop", message.content: "Based on the tool results..."
+```
 
 ## 📂 Project Structure
 
@@ -285,11 +327,24 @@ curl http://localhost:8100/v1beta/models
 curl http://localhost:8100/error/400 -H "Content-Type: application/json" -d '{}'
 curl http://localhost:8100/error/429 -H "Content-Type: application/json" -d '{}'
 
-# X-Mock-Status header — force any HTTP status on any real endpoint
-# Returns HTTP 429 with the normal response body for error passthrough testing
+# X-Mock-Status header — force any HTTP status on any real endpoint.
+# Returns HTTP 429 with an OpenAI-shape error envelope (provider-accurate).
 curl -H "X-Mock-Status: 429" http://localhost:8100/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model": "gpt-4", "messages": [{"role": "user", "content": "Hi"}]}'
+
+# ?chaos_status=503 URL query — stateless per-URL chaos.
+# Lets a gateway register one "broken" endpoint and one "healthy" endpoint
+# against the same mock instance for fallback/circuit-breaker testing.
+curl "http://localhost:8100/v1/chat/completions?chaos_status=503" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gpt-4", "messages": [{"role": "user", "content": "Hi"}]}'
+
+# Anthropic request validation — missing max_tokens returns real 400 envelope
+curl http://localhost:8100/v1/messages \
+  -H "Content-Type: application/json" \
+  -d '{"model": "claude", "messages": [{"role": "user", "content": "Hi"}]}'
+# -> HTTP 400 {"type":"error","error":{"type":"invalid_request_error","message":"max_tokens: Field required"}}
 
 # Anthropic messages
 curl http://localhost:8100/v1/messages \
@@ -305,6 +360,21 @@ curl http://localhost:8100/v1/messages \
 curl -N http://localhost:8100/v1/messages \
   -H "Content-Type: application/json" \
   -d '{"model": "claude-haiku-4-5-20251001", "max_tokens": 200, "stream": true, "messages": [{"role": "user", "content": "Count to 5"}]}'
+
+# Agentic tool loop — send a tool result back and get plain-text synthesis
+# instead of another tool_calls. Lets ADK/LangGraph/LangChain Runner loops
+# terminate against the mock the same way they do against real providers.
+curl http://localhost:8100/v1/chat/completions \
+  -H "Content-Type: application/json" -d '{
+    "model": "gpt-4o",
+    "tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {}}}],
+    "messages": [
+      {"role": "user", "content": "Weather in London?"},
+      {"role": "assistant", "tool_calls": [{"id":"c1","type":"function","function":{"name":"get_weather","arguments":"{}"}}]},
+      {"role": "tool", "tool_call_id": "c1", "content": "15°C cloudy"}
+    ]
+  }'
+# -> {"choices":[{"message":{"content":"Based on the tool results, ...","tool_calls":null}, "finish_reason":"stop"}]}
 
 # With latency simulation
 ./vidaimock --latency 500 --mode realistic
@@ -362,8 +432,9 @@ Provider YAML files in `config/providers/` define how endpoints match and respon
 ```yaml
 name: "my-provider"
 matcher: "^/v1/my/endpoint$"         # Regex path match
-response_template: "my/template.j2"  # Tera template path
-status_code: "200"                   # HTTP status (static or Tera expression)
+response_template: "my/template.j2"  # Tera template path (HTTP 2xx responses)
+error_template: "my/error.j2"        # Tera template path (HTTP 4xx / 5xx responses)
+status_code: "200"                   # HTTP status — static or Tera expression
 priority: 10                         # Higher matches first
 stream:
   enabled: true                      # Compatibility field; the stream block itself enables streaming
@@ -377,9 +448,99 @@ stream:
       template_path: "my/stream_stop.j2"
 ```
 
-**`status_code`** accepts static values (`"400"`) or Tera expressions (`"{{ path_segments | last }}"`) for dynamic HTTP status codes. The bundled `/error/{code}` endpoint uses this to simulate any error.
+**`status_code`** accepts static values (`"400"`) or Tera expressions
+(`"{% if json.max_tokens %}200{% else %}400{% endif %}"`) so a provider can
+validate required fields before returning success. Both `{{ ... }}` expressions
+and `{% ... %}` statements are rendered.
 
-**`frame_format: raw`** gives the template full control over SSE framing — essential for providers like OpenAI's Responses API that use typed `event:` lines.
+**`error_template`** is rendered instead of `response_template` whenever the
+resolved HTTP status is ≥ 400. This is how chaos injection, `X-Mock-Status`,
+`?chaos_status=`, and provider-side validation all produce correctly-shaped
+error envelopes (OpenAI's `{"error": {...}}`, Anthropic's `{"type":"error",...}`,
+Gemini's `{"error":{"code","message","status"}}`). The rendered template has a
+`status_code` variable in scope so it can self-describe per status.
+
+**`frame_format: raw`** gives the template full control over SSE framing —
+essential for providers like OpenAI's Responses API that use typed `event:`
+lines. The renderer preserves blank lines as frame separators so templates
+can emit multi-event sequences (e.g. terminal `finish_reason` chunk → usage
+chunk → `[DONE]`) without framing drift.
+
+### Overriding bundled providers and templates
+
+The bundled providers (`config/providers/*.yaml`) and templates
+(`config/templates/**/*.j2`) are embedded into the binary as sensible
+defaults. Anything in `--config-dir` overrides them by filename — disk
+beats embedded.
+
+- To change how `/v1/chat/completions` responds, drop a
+  `providers/openai.yaml` into your config dir. VidaiMock loads yours
+  instead of the bundled one.
+- To change a template while keeping the provider config, drop a same-path
+  `templates/openai/chat.json.j2` into your config dir. Templates are
+  overridable independently of provider configs.
+- To add a new endpoint, drop any YAML into `providers/` with a unique
+  `matcher`. Higher-`priority` providers match before lower-priority ones.
+
+No restart-tricks, no forking, no git submodules — the overlay is the
+upgrade path. Bundled defaults can change between versions without
+disrupting your customisations.
+
+### Chaos & error injection modes
+
+VidaiMock has four ways to trigger a non-200 response, all funnelling through
+the same `error_template` pipeline:
+
+| Trigger | Scope | Use case |
+|---|---|---|
+| `?chaos_status=503` URL query | Per URL | Gateway registers one "broken" and one "healthy" endpoint against the same mock instance — fallback/circuit-breaker testing |
+| `X-Mock-Status: 429` header | Per request | SDK-level test wants a specific status on a real provider route |
+| `X-Vidai-Chaos-Drop: 100` header | Probabilistic | Chaos testing; returns provider-shaped 500 JSON |
+| Provider `status_code` Tera expression | Per request field | Request validation (e.g. Anthropic's `max_tokens` requirement) |
+
+All four route to the provider's `error_template`, so SDK clients see a
+parseable error envelope regardless of how the failure was injected.
+
+### Tera template helpers
+
+Response templates can call built-in functions to keep logic declarative:
+
+| Helper | Returns | Use case |
+|---|---|---|
+| `uuid()` | random UUID string | IDs (`chatcmpl-{{ uuid() }}`, `msg_{{ uuid() }}`) |
+| `timestamp()` | current unix seconds (int) | `created` / `created_at` fields |
+| `iso_timestamp()` | ISO-8601 string | Human-readable timestamps |
+| `random_int(min, max)` | integer | Mock token counts, call IDs |
+| `random_float(min, max)` | float | Embeddings, scores |
+| `has_tool_result(messages, provider)` | bool | Agentic loop termination — see below |
+
+**`has_tool_result(messages, provider)`** detects whether the request's
+conversation history already contains a tool result, so chat templates can
+switch from "emit another `tool_call`" to "emit plain-text synthesis" and
+agentic Runner loops (ADK, LangGraph, LangChain) terminate correctly.
+Provider-specific shapes recognised:
+
+| `provider` | Detection |
+|---|---|
+| `openai` | any message with `role == "tool"` |
+| `anthropic` | user message whose `content` array contains a block with `type == "tool_result"` |
+| `gemini` | user content whose `parts` array contains a `functionResponse` key |
+
+Default is `openai` when `provider` is omitted. Malformed/missing inputs
+return `false` rather than raising — safe to use unconditionally in
+`{% if %}` guards.
+
+Usage example in a custom OpenAI-compat template:
+
+```jinja2
+{% if json.tools and has_tool_result(messages=json.messages, provider="openai") %}
+  {# Plain-text synthesis branch #}
+{% elif json.tools %}
+  {# Tool call branch #}
+{% else %}
+  {# Default text branch #}
+{% endif %}
+```
 
 ## 📄 License
 

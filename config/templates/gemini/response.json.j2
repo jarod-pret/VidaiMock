@@ -1,24 +1,32 @@
 {#
    Gemini generateContent response template.
 
-   Branches on request fields:
-     - tools present -> functionCall with finishMessage
-     - default -> text response
+   Branches on request fields (order matters):
+     - tools present + functionResponse already in contents -> plain text
+       (terminates agentic tool-calling loops; otherwise ADK would loop)
+     - tools present                                       -> functionCall
+     - default                                             -> text response
 
    Includes Gemini 2.5 fields: thoughtsTokenCount, promptTokensDetails,
    modelVersion, responseId.
 #}
+{%- set has_result = has_tool_result(messages=json.contents, provider="gemini") -%}
+{%- set emit_function_call = json.tools and not has_result -%}
 {
   "candidates": [
     {
       "content": {
         "parts": [
-          {% if json.tools %}
+          {% if emit_function_call %}
           {
             "functionCall": {
               "name": "{{ json.tools.0.functionDeclarations.0.name | default(value='mock_function') }}",
               "args": {}
             }
+          }
+          {% elif has_result %}
+          {
+            "text": "Based on the tool results, here is the answer."
           }
           {% else %}
           {
@@ -28,7 +36,7 @@
         ],
         "role": "model"
       },
-      {% if json.tools %}
+      {% if emit_function_call %}
       "finishReason": "STOP",
       "finishMessage": "Model generated function call(s).",
       {% else %}

@@ -1,19 +1,24 @@
 {#
    Anthropic /v1/messages response template.
 
-   Branches on request fields:
-     - tools present -> tool_use content block with stop_reason: tool_use
-     - default -> text response with stop_reason: end_turn
+   Branches on request fields (order matters):
+     - tools present + tool_result already in messages -> plain text synthesis
+       (terminates agentic tool-calling loops; otherwise ADK/LangGraph
+       would call the mock forever)
+     - tools present                                  -> tool_use block
+     - default                                        -> text response
 
    Includes 2025+ fields: cache_creation, service_tier, inference_geo, stop_details.
 #}
+{%- set has_result = has_tool_result(messages=json.messages, provider="anthropic") -%}
+{%- set emit_tool_use = json.tools and not has_result -%}
 {
   "id": "msg_{{ uuid }}",
   "type": "message",
   "role": "assistant",
   "model": "{{ model | default(value='claude-haiku-4-5-20251001') }}",
   "content": [
-    {% if json.tools %}
+    {% if emit_tool_use %}
     {
       "type": "tool_use",
       "id": "toolu_{{ uuid }}",
@@ -23,6 +28,11 @@
         "type": "direct"
       }
     }
+    {% elif has_result %}
+    {
+      "type": "text",
+      "text": "Based on the tool results, here is the answer."
+    }
     {% else %}
     {
       "type": "text",
@@ -30,7 +40,7 @@
     }
     {% endif %}
   ],
-  {% if json.tools %}
+  {% if emit_tool_use %}
   "stop_reason": "tool_use",
   {% else %}
   "stop_reason": "end_turn",

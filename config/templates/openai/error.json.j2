@@ -1,0 +1,18 @@
+{#- OpenAI-shape error envelope.
+    Real OpenAI errors:
+      HTTP 400: {"error":{"message":"...","type":"invalid_request_error","param":"...","code":"..."}}
+      HTTP 401: {"error":{"message":"...","type":"invalid_request_error","code":"invalid_api_key"}}
+      HTTP 404: {"error":{"message":"...","type":"invalid_request_error","code":"model_not_found"}}
+      HTTP 429: {"error":{"message":"...","type":"rate_limit_exceeded","code":"rate_limit_exceeded"}}
+      HTTP 500: {"error":{"message":"...","type":"server_error"}}
+
+    Rendered when a chaos override triggers an error response. Uses the
+    injected `status_code` context variable to self-describe. -#}
+{
+  "error": {
+    "message": "Mock error response (HTTP {{ status_code | default(value=500) }}).",
+    "type": {% if status_code == 401 %}"invalid_request_error"{% elif status_code == 429 %}"rate_limit_exceeded"{% elif status_code >= 500 %}"server_error"{% else %}"invalid_request_error"{% endif %},
+    "param": null,
+    "code": {% if status_code == 401 %}"invalid_api_key"{% elif status_code == 404 %}"model_not_found"{% elif status_code == 429 %}"rate_limit_exceeded"{% else %}null{% endif %}
+  }
+}
