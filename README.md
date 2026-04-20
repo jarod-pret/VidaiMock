@@ -198,6 +198,8 @@ Tenant self-management lives under `/tenant/` and uses tenant auth, not global a
 
 Tenant self-management is scoped to the resolved tenant only. A tenant-admin can inspect or reload its own tenant, but cannot target another tenant by path or input.
 
+In single mode there is no tenant-specific auth surface, so `/tenant/*` is closed unless `tenancy.admin_auth` is configured and supplied.
+
 ## 🔄 Reload Semantics
 
 `POST /admin/reload` re-runs startup config loading from the original startup source, then rebuilds the live tenancy, admin-auth, provider, and template runtime atomically.
@@ -205,6 +207,7 @@ Tenant self-management is scoped to the resolved tenant only. A tenant-admin can
 - Reload validates before activation.
 - Failed reload keeps the previous working runtime active.
 - It refreshes the live tenancy/admin/provider/template runtime, not the whole process shape.
+- Changes to process-shaped settings such as `host`, `port`, `workers`, `log_level`, `latency`, `chaos`, `endpoints`, and `response_file` are rejected at reload time and still require a restart.
 - This is an explicit reload operation, not watch mode.
 
 `POST /tenant/reload` refreshes only the resolved tenant.

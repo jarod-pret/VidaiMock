@@ -17,10 +17,11 @@
  * VidaiMock: High-performance LLM API Mock Server.
  */
 
+use arc_swap::ArcSwap;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use crate::config::AppConfig;
 use crate::provider::{build_registry_from_layers, ProviderRegistry};
@@ -52,7 +53,7 @@ pub struct TenantStore {
 }
 
 pub struct TenantStoreHandle {
-    current: RwLock<Arc<TenantStore>>,
+    current: ArcSwap<TenantStore>,
 }
 
 impl TenantStore {
@@ -102,17 +103,17 @@ impl TenantStore {
 impl TenantStoreHandle {
     pub fn new(initial: Arc<TenantStore>) -> Self {
         Self {
-            current: RwLock::new(initial),
+            current: ArcSwap::from(initial),
         }
     }
 
     pub fn current(&self) -> Arc<TenantStore> {
-        self.current.read().unwrap().clone()
+        self.current.load_full()
     }
 
     pub fn reload_all(&self, config: &AppConfig) -> Result<Arc<TenantStore>, Box<dyn Error>> {
         let rebuilt = build_runtime_store(config)?;
-        *self.current.write().unwrap() = rebuilt.clone();
+        self.current.store(rebuilt.clone());
         Ok(rebuilt)
     }
 
@@ -123,7 +124,7 @@ impl TenantStoreHandle {
             TenancyMode::Multi => reload_multi_mode_tenant(&current, tenant_id)?,
         };
 
-        *self.current.write().unwrap() = updated.clone();
+        self.current.store(updated.clone());
         Ok(updated)
     }
 }

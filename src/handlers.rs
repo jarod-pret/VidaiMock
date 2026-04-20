@@ -257,14 +257,35 @@ fn resolve_tenant_admin_or_reject(
     query_params: &HashMap<String, String>,
 ) -> Result<TenantResolution, Response> {
     let store = state.tenants.current();
-    if store.mode == TenancyMode::Multi && !store.has_explicit_tenant_signal(headers, query_params)
-    {
+    if store.mode == TenancyMode::Single {
+        authorize_admin_or_reject(state, headers)?;
+        return store
+            .resolve_request(headers, query_params)
+            .map_err(tenant_rejection_response);
+    }
+
+    if !store.has_explicit_tenant_signal(headers, query_params) {
         return Err((StatusCode::UNAUTHORIZED, "Tenant admin auth required.").into_response());
     }
 
     store
         .resolve_request(headers, query_params)
         .map_err(tenant_rejection_response)
+}
+
+fn constant_time_eq_str(left: &str, right: &str) -> bool {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    let max_len = left.len().max(right.len());
+    let mut diff = left.len() ^ right.len();
+
+    for index in 0..max_len {
+        let left_byte = left.get(index).copied().unwrap_or_default();
+        let right_byte = right.get(index).copied().unwrap_or_default();
+        diff |= usize::from(left_byte ^ right_byte);
+    }
+
+    diff == 0
 }
 
 fn authorize_admin_or_reject(state: &Arc<AppState>, headers: &HeaderMap) -> Result<(), Response> {
@@ -282,20 +303,32 @@ fn authorize_admin_or_reject(state: &Arc<AppState>, headers: &HeaderMap) -> Resu
     };
 
     let provided = provided.trim();
-    let header_matches = provided == expected_secret
+    let header_matches = constant_time_eq_str(provided, expected_secret)
         || (store
             .admin_auth_header
             .eq_ignore_ascii_case("authorization")
             && provided
                 .strip_prefix("Bearer ")
                 .or_else(|| provided.strip_prefix("bearer "))
-                .is_some_and(|value| value.trim() == expected_secret));
+                .is_some_and(|value| constant_time_eq_str(value.trim(), expected_secret)));
 
     if header_matches {
         Ok(())
     } else {
         Err((StatusCode::UNAUTHORIZED, "Admin authentication required.").into_response())
     }
+}
+
+fn reload_requires_restart_response(changed_fields: &[&'static str]) -> Response {
+    let joined_fields = changed_fields.join(", ");
+    (
+        StatusCode::CONFLICT,
+        format!(
+            "Reload requires restart because these settings changed: {}.",
+            joined_fields
+        ),
+    )
+        .into_response()
 }
 
 fn internal_error_response(message: &str, error: impl std::fmt::Display) -> Response {
@@ -348,12 +381,17 @@ pub async fn admin_reload_handler(
         return response;
     }
 
-    // Reload re-reads the startup config source and rebuilds the live tenancy/admin/runtime state.
-    // It does not rebuild the listener, router, or the serialized startup AppConfig returned by /status.
+    // Reload only refreshes the live tenant/admin/provider/template runtime snapshot.
+    // Settings that shape process behavior still require a restart.
     let reloaded_config = match state.config.reload_from_source() {
         Ok(config) => config,
         Err(error) => return internal_error_response("Reload failed", error),
     };
+
+    let changed_fields = state.config.reload_requires_restart(&reloaded_config);
+    if !changed_fields.is_empty() {
+        return reload_requires_restart_response(&changed_fields);
+    }
 
     let store = match state.tenants.reload_all(&reloaded_config) {
         Ok(store) => store,

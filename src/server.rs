@@ -1381,6 +1381,48 @@ priority: 100
     }
 
     #[tokio::test]
+    async fn test_admin_endpoints_accept_authorization_bearer_secret() {
+        let temp_base = management_test_base("test_admin_accepts_bearer_secret");
+        write_provider(
+            &temp_base.join("tenants/default/providers/openai.yaml"),
+            r#"{"tenant":"default"}"#,
+        );
+        write_provider(
+            &temp_base.join("tenants/acme/providers/openai.yaml"),
+            r#"{"tenant":"acme"}"#,
+        );
+        write_provider(
+            &temp_base.join("tenants/globex/providers/openai.yaml"),
+            r#"{"tenant":"globex"}"#,
+        );
+
+        let mut config = managed_multi_tenant_config(&temp_base);
+        config.tenancy.admin_auth.header = "authorization".to_string();
+        let app = create_app(
+            config.clone(),
+            None,
+            Arc::new(TenantStoreHandle::new(
+                build_runtime_store(&config).unwrap(),
+            )),
+        )
+        .await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/tenants")
+                    .header("authorization", "Bearer global-admin-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        fs::remove_dir_all(temp_base).unwrap();
+    }
+
+    #[tokio::test]
     async fn test_global_admin_can_inspect_one_tenant() {
         let temp_base = management_test_base("test_admin_inspects_tenant");
         write_provider(
@@ -1658,6 +1700,122 @@ priority: 100
             .unwrap();
         assert_eq!(after_failed_reload.status(), StatusCode::OK);
         assert!(response_text(after_failed_reload).await.contains("acme"));
+
+        fs::remove_dir_all(temp_base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_admin_reload_rejects_restart_required_config_changes() {
+        let temp_base = management_test_base("test_admin_reload_rejects_restart_required_changes");
+        write_provider(
+            &temp_base.join("tenants/default/providers/openai.yaml"),
+            r#"{"tenant":"default"}"#,
+        );
+        write_provider(
+            &temp_base.join("tenants/acme/providers/openai.yaml"),
+            r#"{"tenant":"acme-before"}"#,
+        );
+        write_provider(
+            &temp_base.join("tenants/globex/providers/openai.yaml"),
+            r#"{"tenant":"globex"}"#,
+        );
+
+        let config_path = write_file_backed_management_config(
+            &temp_base,
+            "global-admin-secret",
+            "secret-acme",
+            false,
+        );
+        let config = load_file_backed_management_config(&config_path);
+        let app = create_app(
+            config.clone(),
+            None,
+            Arc::new(TenantStoreHandle::new(
+                build_runtime_store(&config).unwrap(),
+            )),
+        )
+        .await;
+
+        write_provider(
+            &temp_base.join("tenants/acme/providers/openai.yaml"),
+            r#"{"tenant":"acme-after"}"#,
+        );
+        fs::write(
+            &config_path,
+            format!(
+                r#"
+port = 8100
+workers = 1
+log_level = "debug"
+config_dir = "{config_dir}"
+
+[latency]
+mode = "realistic"
+base_ms = 25
+jitter_pct = 0.0
+
+[tenancy]
+mode = "multi"
+tenants_dir = "{tenants_dir}"
+tenant_header = "x-tenant"
+
+[tenancy.admin_auth]
+header = "x-admin-key"
+value = "global-admin-secret"
+
+[[tenancy.tenants]]
+id = "acme"
+
+[[tenancy.tenants.keys]]
+source = "header"
+name = "x-api-key"
+value = "secret-acme"
+
+[[tenancy.tenants]]
+id = "globex"
+
+[[tenancy.tenants.keys]]
+source = "header"
+name = "x-api-key"
+value = "secret-globex"
+"#,
+                config_dir = toml_path(&temp_base.join("config")),
+                tenants_dir = toml_path(&temp_base.join("tenants")),
+            ),
+        )
+        .unwrap();
+
+        let reload = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/reload")
+                    .header("x-admin-key", "global-admin-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reload.status(), StatusCode::CONFLICT);
+        assert!(response_text(reload).await.contains("latency"));
+
+        let after_failed_reload = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("x-api-key", "secret-acme")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(after_failed_reload.status(), StatusCode::OK);
+        assert!(response_text(after_failed_reload)
+            .await
+            .contains("acme-before"));
 
         fs::remove_dir_all(temp_base).unwrap();
     }
@@ -2321,7 +2479,7 @@ priority: 100
     }
 
     #[tokio::test]
-    async fn test_single_mode_management_endpoints_still_work() {
+    async fn test_single_mode_tenant_management_requires_admin_auth() {
         let temp_base = management_test_base("test_single_mode_management");
         write_provider(
             &temp_base.join("config/providers/openai.yaml"),
@@ -2348,10 +2506,50 @@ priority: 100
             )
             .await
             .unwrap();
+        assert_eq!(tenant_response.status(), StatusCode::UNAUTHORIZED);
+
+        let tenant_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/tenant")
+                    .header("x-admin-key", "global-admin-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(tenant_response.status(), StatusCode::OK);
         let tenant_body: serde_json::Value =
             serde_json::from_str(&response_text(tenant_response).await).unwrap();
         assert_eq!(tenant_body["id"], "default");
+
+        let tenant_reload_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/tenant/reload")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(tenant_reload_response.status(), StatusCode::UNAUTHORIZED);
+
+        let tenant_reload_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/tenant/reload")
+                    .header("x-admin-key", "global-admin-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(tenant_reload_response.status(), StatusCode::OK);
 
         let admin_response = app
             .oneshot(

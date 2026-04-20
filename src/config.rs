@@ -50,7 +50,7 @@ fn default_host() -> String {
     "0.0.0.0".to_string()
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct LatencyConfig {
     pub mode: String, // "benchmark", "realistic", "debug"
     pub base_ms: u64,
@@ -67,7 +67,7 @@ impl Default for LatencyConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 pub struct EndpointConfig {
     pub path: String,
     pub format: String, // "openai", "anthropic", "gemini", "openrouter", "echo" or custom
@@ -231,9 +231,40 @@ impl AppConfig {
             .validate()
             .map_err(config::ConfigError::Message)
     }
+
+    pub fn reload_requires_restart(&self, next: &Self) -> Vec<&'static str> {
+        let mut fields = Vec::new();
+
+        if self.host != next.host {
+            fields.push("host");
+        }
+        if self.port != next.port {
+            fields.push("port");
+        }
+        if self.workers != next.workers {
+            fields.push("workers");
+        }
+        if self.log_level != next.log_level {
+            fields.push("log_level");
+        }
+        if self.latency != next.latency {
+            fields.push("latency");
+        }
+        if self.chaos != next.chaos {
+            fields.push("chaos");
+        }
+        if self.endpoints != next.endpoints {
+            fields.push("endpoints");
+        }
+        if self.response_file != next.response_file {
+            fields.push("response_file");
+        }
+
+        fields
+    }
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct ChaosConfig {
     /// Compatibility flag retained for config stability. Chaos behavior is
     /// driven by the percentages and delay fields below.
@@ -531,5 +562,22 @@ value = "shared"
         assert!(key.get("value").is_none());
         assert!(key.get("value_file").is_none());
         assert!(key.get("value_env").is_none());
+    }
+
+    #[test]
+    fn test_reload_requires_restart_detects_non_runtime_changes() {
+        let mut current = AppConfig::build_config(Cli::parse_from(&["mock-server"])).unwrap();
+        current.reload_args = None;
+
+        let mut next = current.clone();
+        next.latency.base_ms = 25;
+        next.endpoints.push(EndpointConfig {
+            path: "/v1/test".to_string(),
+            format: "echo".to_string(),
+            content_type: None,
+        });
+
+        let changed = current.reload_requires_restart(&next);
+        assert_eq!(changed, vec!["latency", "endpoints"]);
     }
 }

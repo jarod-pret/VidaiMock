@@ -398,10 +398,7 @@ fn resolve_secret_value(
         })?
     } else if let Some(env_name) = value_env {
         std::env::var(env_name).map_err(|error| {
-            format!(
-                "failed to read {kind} secret env '{}' : {}",
-                env_name, error
-            )
+            format!("failed to read {kind} secret env '{}': {}", env_name, error)
         })?
     } else {
         inline_value.to_string()
