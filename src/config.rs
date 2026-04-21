@@ -273,6 +273,9 @@ impl AppConfig {
         if self.response_file != next.response_file {
             fields.push("response_file");
         }
+        if self.tenancy != next.tenancy {
+            fields.push("tenancy");
+        }
 
         fields
     }

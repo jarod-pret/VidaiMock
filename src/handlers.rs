@@ -37,8 +37,8 @@ use tokio::time::{sleep, Duration};
 use crate::config::{AppConfig, ChaosConfig, LatencyConfig};
 use crate::provider::ProviderRegistry;
 use crate::tenancy::{
-    list_tenants, tenant_view, ReloadView, TenancyMode, TenantRequestMetrics, TenantResolution,
-    TenantResolutionError, TenantRuntime, TenantStoreHandle,
+    constant_time_eq_str, list_tenants, tenant_view, ReloadView, TenancyMode, TenantRequestMetrics,
+    TenantResolution, TenantResolutionError, TenantRuntime, TenantStoreHandle,
 };
 
 #[derive(Clone)]
@@ -284,20 +284,6 @@ fn resolve_tenant_admin_or_reject(
     })
 }
 
-fn constant_time_eq_str(left: &str, right: &str) -> bool {
-    let left = left.as_bytes();
-    let right = right.as_bytes();
-    let max_len = left.len().max(right.len());
-    let mut diff = left.len() ^ right.len();
-
-    for index in 0..max_len {
-        let left_byte = left.get(index).copied().unwrap_or_default();
-        let right_byte = right.get(index).copied().unwrap_or_default();
-        diff |= usize::from(left_byte ^ right_byte);
-    }
-
-    diff == 0
-}
 
 fn authorize_admin_or_reject(state: &Arc<AppState>, headers: &HeaderMap) -> Result<(), Response> {
     let store = state.tenants.current();
@@ -832,9 +818,31 @@ async fn streaming_handler_inner(
                     .as_deref()
                     .or(provider.response_template.as_deref());
                 let body = if let Some(tpl) = chosen_template {
-                    registry.tera.render(tpl, &base_context).unwrap_or_default()
+                    match registry.tera.render(tpl, &base_context) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            return response_with_metrics(
+                                internal_error_response(
+                                    "Stream error-status render failed",
+                                    e,
+                                ),
+                                resolution.metrics,
+                            );
+                        }
+                    }
                 } else if let Some(b) = &provider.response_body {
-                    registry.render_str(b, &base_context).unwrap_or_default()
+                    match registry.render_str(b, &base_context) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            return response_with_metrics(
+                                internal_error_response(
+                                    "Stream error-status render failed",
+                                    e,
+                                ),
+                                resolution.metrics,
+                            );
+                        }
+                    }
                 } else {
                     String::new()
                 };
@@ -891,9 +899,23 @@ async fn streaming_handler_inner(
                             if let Some(on_start) = &lc.on_start {
                                 // Context setup?
                                 if let Some(tmpl) = &on_start.template_body {
-                                    Some(tera::Tera::one_off(tmpl, &ctx, false).unwrap_or_default())
+                                    Some(tera::Tera::one_off(tmpl, &ctx, false).unwrap_or_else(
+                                        |e| {
+                                            tracing::error!(
+                                                "on_start template_body render failed: {}",
+                                                e
+                                            );
+                                            String::new()
+                                        },
+                                    ))
                                 } else if let Some(path) = &on_start.template_path {
-                                    Some(registry.tera.render(path, &ctx).unwrap_or_default())
+                                    Some(registry.tera.render(path, &ctx).unwrap_or_else(|e| {
+                                        tracing::error!(
+                                            "on_start template_path render failed: {}",
+                                            e
+                                        );
+                                        String::new()
+                                    }))
                                 } else {
                                     None
                                 }
@@ -912,9 +934,23 @@ async fn streaming_handler_inner(
                             if let Some(on_chunk) = &lc.on_chunk {
                                 // Context already has "chunk"
                                 if let Some(tmpl) = &on_chunk.template_body {
-                                    Some(tera::Tera::one_off(tmpl, &ctx, false).unwrap_or_default())
+                                    Some(tera::Tera::one_off(tmpl, &ctx, false).unwrap_or_else(
+                                        |e| {
+                                            tracing::error!(
+                                                "on_chunk template_body render failed: {}",
+                                                e
+                                            );
+                                            String::new()
+                                        },
+                                    ))
                                 } else if let Some(path) = &on_chunk.template_path {
-                                    Some(registry.tera.render(path, &ctx).unwrap_or_default())
+                                    Some(registry.tera.render(path, &ctx).unwrap_or_else(|e| {
+                                        tracing::error!(
+                                            "on_chunk template_path render failed: {}",
+                                            e
+                                        );
+                                        String::new()
+                                    }))
                                 } else {
                                     Some(chunk.to_string())
                                 }
@@ -925,7 +961,13 @@ async fn streaming_handler_inner(
                                     chunk_ctx.insert("chunk", &chunk);
                                     Some(
                                         tera::Tera::one_off(fmt, &chunk_ctx, false)
-                                            .unwrap_or_else(|_| chunk.to_string()),
+                                            .unwrap_or_else(|e| {
+                                                tracing::error!(
+                                                    "stream format template render failed: {}",
+                                                    e
+                                                );
+                                                chunk.to_string()
+                                            }),
                                     )
                                 } else {
                                     Some(chunk.to_string())
@@ -939,9 +981,23 @@ async fn streaming_handler_inner(
                         if let Some(lc) = &lifecycle {
                             if let Some(on_stop) = &lc.on_stop {
                                 if let Some(tmpl) = &on_stop.template_body {
-                                    Some(tera::Tera::one_off(tmpl, &ctx, false).unwrap_or_default())
+                                    Some(tera::Tera::one_off(tmpl, &ctx, false).unwrap_or_else(
+                                        |e| {
+                                            tracing::error!(
+                                                "on_stop template_body render failed: {}",
+                                                e
+                                            );
+                                            String::new()
+                                        },
+                                    ))
                                 } else if let Some(path) = &on_stop.template_path {
-                                    Some(registry.tera.render(path, &ctx).unwrap_or_default())
+                                    Some(registry.tera.render(path, &ctx).unwrap_or_else(|e| {
+                                        tracing::error!(
+                                            "on_stop template_path render failed: {}",
+                                            e
+                                        );
+                                        String::new()
+                                    }))
                                 } else {
                                     None
                                 }

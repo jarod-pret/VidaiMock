@@ -2843,3 +2843,90 @@ value = "secret-acme"
 
     fs::remove_dir_all(temp_base).unwrap();
 }
+
+/// Regression: reload_requires_restart must detect tenancy config changes so
+/// that operators cannot silently apply a new tenant_header, mode, or admin_auth
+/// config through a live reload. Previously the tenancy field was not included
+/// in the restart-required detection.
+#[tokio::test]
+async fn test_admin_reload_rejects_tenancy_config_changes() {
+    let temp_base = management_test_base("test_admin_reload_rejects_tenancy_changes");
+    write_provider(
+        &temp_base.join("tenants/default/providers/openai.yaml"),
+        r#"{"tenant":"default"}"#,
+    );
+    write_provider(
+        &temp_base.join("tenants/acme/providers/openai.yaml"),
+        r#"{"tenant":"acme"}"#,
+    );
+
+    let config_path = write_file_backed_management_config(
+        &temp_base,
+        "global-admin-secret",
+        "secret-acme",
+        false,
+    );
+    let config = load_file_backed_management_config(&config_path);
+    let app = create_app(
+        config.clone(),
+        None,
+        Arc::new(TenantStoreHandle::new(
+            build_runtime_store(&config).unwrap(),
+        )),
+    )
+    .await;
+
+    // Rewrite the config file with a different tenant_header ("x-org" instead
+    // of "x-tenant"). Everything else stays the same so this is the only
+    // change that should trigger the restart-required response.
+    fs::write(
+        &config_path,
+        format!(
+            r#"
+port = 8100
+workers = 1
+log_level = "debug"
+config_dir = "{config_dir}"
+
+[tenancy]
+mode = "multi"
+tenants_dir = "{tenants_dir}"
+tenant_header = "x-org"
+
+[tenancy.admin_auth]
+header = "x-admin-key"
+value = "global-admin-secret"
+"#,
+            config_dir = toml_path(&temp_base.join("config")),
+            tenants_dir = toml_path(&temp_base.join("tenants")),
+        ),
+    )
+    .unwrap();
+
+    let reload = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/reload")
+                .header("x-admin-key", "global-admin-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        reload.status(),
+        StatusCode::CONFLICT,
+        "a tenancy config change must be rejected with CONFLICT to require restart"
+    );
+    let body = response_text(reload).await;
+    assert!(
+        body.contains("tenancy"),
+        "CONFLICT response must mention 'tenancy'; got: {}",
+        body
+    );
+
+    fs::remove_dir_all(temp_base).unwrap();
+}

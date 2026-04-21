@@ -22,7 +22,8 @@ use crate::server::start_server;
 use crate::tenancy::{build_runtime_store, TenantStoreHandle};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use mimalloc::MiMalloc;
-use tracing::{info, Level};
+use tracing::info;
+use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::FmtSubscriber;
 
 #[global_allocator]
@@ -53,23 +54,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // Initialize Logging
-    let log_level = match config.log_level.to_lowercase().as_str() {
-        "debug" => Level::DEBUG,
-        "warn" => Level::WARN,
-        "error" => Level::ERROR,
-        "off" => Level::ERROR,
-        _ => Level::INFO,
+    // Initialize Logging.
+    // LevelFilter::OFF completely disables tracing so "off" behaves honestly.
+    let log_filter = match config.log_level.to_lowercase().as_str() {
+        "off" => LevelFilter::OFF,
+        "error" => LevelFilter::ERROR,
+        "warn" => LevelFilter::WARN,
+        "debug" => LevelFilter::DEBUG,
+        _ => LevelFilter::INFO,
     };
 
-    let subscriber = FmtSubscriber::builder().with_max_level(log_level).finish();
+    let subscriber = FmtSubscriber::builder().with_max_level(log_filter).finish();
 
     if let Err(e) = tracing::subscriber::set_global_default(subscriber) {
         eprintln!("ERROR: Failed to initialize logging: {}", e);
         std::process::exit(1);
     }
 
-    if config.log_level != "off" {
+    if log_filter != LevelFilter::OFF {
         tracing::info!(
             "VidaiMock Initialization (Workers: {}, Latency: {}ms, Mode: {})",
             workers,

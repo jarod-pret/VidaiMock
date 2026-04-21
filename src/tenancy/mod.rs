@@ -28,4 +28,5 @@ pub use config::{
 };
 pub use management::{list_tenants, tenant_view, ReloadView};
 pub use resolution::{TenantRequestMetrics, TenantResolution, TenantResolutionError};
+pub(crate) use resolution::constant_time_eq_str;
 pub use runtime::{build_runtime_store, TenantRuntime, TenantStore, TenantStoreHandle};

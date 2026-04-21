@@ -291,7 +291,7 @@ fn management_secret_matches(header_name: &str, provided: &str, expected_secret:
                 .is_some_and(|value| constant_time_eq_str(value.trim(), expected_secret)))
 }
 
-fn constant_time_eq_str(left: &str, right: &str) -> bool {
+pub(crate) fn constant_time_eq_str(left: &str, right: &str) -> bool {
     let left = left.as_bytes();
     let right = right.as_bytes();
     let max_len = left.len().max(right.len());
