@@ -2666,8 +2666,7 @@ value = "secret-acme"
     }
 
     // Confirm the body was echoed back unmodified.
-    // (Read body after metrics check since into_body() consumes the response.)
-    // Note: body was already consumed above via extensions(), so we just check status.
+    assert_eq!(response_text(ok_response).await, body_content);
 
     fs::remove_dir_all(temp_base).unwrap();
 }
