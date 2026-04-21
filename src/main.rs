@@ -38,6 +38,20 @@ mod provider;
 mod replacer;
 mod server; // Added for Bedrock streaming
 
+/// Maps a `log_level` string to a `LevelFilter`.
+///
+/// `"off"` maps to `LevelFilter::OFF` to actually disable all tracing output.
+/// Unknown values fall back to `LevelFilter::INFO`.
+pub(crate) fn level_filter_from_str(log_level: &str) -> LevelFilter {
+    match log_level.to_lowercase().as_str() {
+        "off" => LevelFilter::OFF,
+        "error" => LevelFilter::ERROR,
+        "warn" => LevelFilter::WARN,
+        "debug" => LevelFilter::DEBUG,
+        _ => LevelFilter::INFO,
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = AppConfig::load()?;
     let workers = config.workers;
@@ -56,13 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialize Logging.
     // LevelFilter::OFF completely disables tracing so "off" behaves honestly.
-    let log_filter = match config.log_level.to_lowercase().as_str() {
-        "off" => LevelFilter::OFF,
-        "error" => LevelFilter::ERROR,
-        "warn" => LevelFilter::WARN,
-        "debug" => LevelFilter::DEBUG,
-        _ => LevelFilter::INFO,
-    };
+    let log_filter = level_filter_from_str(&config.log_level);
 
     let subscriber = FmtSubscriber::builder().with_max_level(log_filter).finish();
 

@@ -1770,8 +1770,8 @@ fn test_reload_requires_restart_detects_tenancy_change() {
 }
 
 /// Regression: log_level = "off" must map to LevelFilter::OFF.
-/// This is a unit test for the mapping logic; it verifies that the string
-/// "off" results in the correct LevelFilter, not a permissive one like ERROR.
+/// Tests the actual `level_filter_from_str` function used in main.rs so the
+/// test is not brittle to mapping changes.
 #[test]
 fn test_log_level_off_maps_to_level_filter_off() {
     use tracing_subscriber::filter::LevelFilter;
@@ -1780,20 +1780,14 @@ fn test_log_level_off_maps_to_level_filter_off() {
         ("off", LevelFilter::OFF),
         ("error", LevelFilter::ERROR),
         ("warn", LevelFilter::WARN),
-        ("debug", LevelFilter::DEBUG),
         ("info", LevelFilter::INFO),
+        ("debug", LevelFilter::DEBUG),
         ("unknown", LevelFilter::INFO), // unknown falls back to INFO
         ("OFF", LevelFilter::OFF),      // case-insensitive
     ];
 
     for (input, expected) in cases {
-        let actual = match input.to_lowercase().as_str() {
-            "off" => LevelFilter::OFF,
-            "error" => LevelFilter::ERROR,
-            "warn" => LevelFilter::WARN,
-            "debug" => LevelFilter::DEBUG,
-            _ => LevelFilter::INFO,
-        };
+        let actual = crate::level_filter_from_str(input);
         assert_eq!(
             actual, *expected,
             "log_level '{}' must map to {:?}, got {:?}",
