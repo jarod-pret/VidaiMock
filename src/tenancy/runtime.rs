@@ -142,6 +142,9 @@ impl TenantStoreHandle {
     }
 
     pub fn reload_all(&self, config: &AppConfig) -> Result<Arc<TenantStore>, Box<dyn Error>> {
+        // Serialize the full rebuild+swap sequence so two successful reloads
+        // cannot both build from stale state and then race to overwrite the
+        // live store. Reads stay lock-free via ArcSwap::load_full().
         let _guard = self.lock_reload_guard();
         let rebuilt = build_runtime_store(config)?;
         self.current.store(rebuilt.clone());
@@ -149,6 +152,10 @@ impl TenantStoreHandle {
     }
 
     pub fn reload_tenant(&self, tenant_id: &str) -> Result<Arc<TenantStore>, Box<dyn Error>> {
+        // Tenant reload also participates in the same single-writer guard
+        // because it clones and mutates the current store before swapping it
+        // back in. Without this, a concurrent reload_all/reload_tenant pair
+        // could silently lose one successful update.
         let _guard = self.lock_reload_guard();
         let current = self.current();
         let updated = match current.mode {
@@ -773,6 +780,60 @@ mod tests {
         let current = handle.current();
         assert_eq!(tenant_provider_name(&current, "acme"), "acme-after");
         assert_eq!(tenant_provider_name(&current, "globex"), "globex-after");
+
+        fs::remove_dir_all(temp_base).unwrap();
+    }
+
+    #[test]
+    fn concurrent_admin_and_tenant_reloads_preserve_each_successful_update() {
+        let temp_base = unique_test_dir("concurrent_admin_and_tenant_reloads_preserve_updates");
+        write_tenant_metadata(&temp_base, "acme", "id = \"acme\"\n");
+        write_tenant_metadata(&temp_base, "globex", "id = \"globex\"\n");
+        write_provider(
+            &temp_base.join("tenants/acme/providers/openai.yaml"),
+            "acme-before",
+        );
+        write_provider(
+            &temp_base.join("tenants/globex/providers/openai.yaml"),
+            "globex-before",
+        );
+
+        let mut config = runtime_test_config(&temp_base);
+        config.tenancy.admin_auth = AdminAuthConfig {
+            header: "x-admin-key".to_string(),
+            value: "old-admin-secret".to_string(),
+            value_file: None,
+            value_env: None,
+        };
+
+        let handle = Arc::new(TenantStoreHandle::new(build_runtime_store(&config).unwrap()));
+
+        write_provider(
+            &temp_base.join("tenants/acme/providers/openai.yaml"),
+            "acme-after",
+        );
+
+        let mut reloaded_config = config.clone();
+        reloaded_config.tenancy.admin_auth.value = "new-admin-secret".to_string();
+
+        let guard = handle.lock_reload_guard();
+
+        let tenant_handle = Arc::clone(&handle);
+        let tenant_thread =
+            std::thread::spawn(move || tenant_handle.reload_tenant("acme").unwrap());
+
+        let admin_handle = Arc::clone(&handle);
+        let admin_thread =
+            std::thread::spawn(move || admin_handle.reload_all(&reloaded_config).unwrap());
+
+        drop(guard);
+
+        tenant_thread.join().unwrap();
+        admin_thread.join().unwrap();
+
+        let current = handle.current();
+        assert_eq!(tenant_provider_name(&current, "acme"), "acme-after");
+        assert_eq!(current.admin_auth_secret.as_deref(), Some("new-admin-secret"));
 
         fs::remove_dir_all(temp_base).unwrap();
     }
