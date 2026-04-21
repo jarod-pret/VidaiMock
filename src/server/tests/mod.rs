@@ -1556,3 +1556,242 @@ async fn test_streaming_body_render_failure_returns_500() {
         body_text
     );
 }
+
+fn make_streaming_store_with_body(response_body: &str) -> Arc<TenantStoreHandle> {
+    make_streaming_store_with_status_and_body(response_body, None)
+}
+
+fn make_streaming_store_with_status_and_body(
+    response_body: &str,
+    status_code: Option<&str>,
+) -> Arc<TenantStoreHandle> {
+    let mut registry = crate::provider::ProviderRegistry::new();
+    registry
+        .add_provider(crate::provider::ProviderConfig {
+            name: "openai".to_string(),
+            matcher: "^/v1/chat/completions$".to_string(),
+            request_mapping: HashMap::new(),
+            response_template: None,
+            response_body: Some(response_body.to_string()),
+            stream: Some(crate::provider::ProviderStreamConfig {
+                enabled: true,
+                format: None,
+                encoding: None,
+                frame_format: None,
+                lifecycle: None,
+            }),
+            status_code: status_code.map(str::to_string),
+            error_template: None,
+            priority: 100,
+        })
+        .unwrap();
+
+    Arc::new(TenantStoreHandle::new(Arc::new(TenantStore::new(
+        TenancyMode::Single,
+        PathBuf::from("config"),
+        crate::tenancy::TenancyConfig::default(),
+        crate::config::LatencyConfig::default(),
+        crate::config::ChaosConfig::default(),
+        "x-admin-key".to_string(),
+        None,
+        "x-tenant".to_string(),
+        Arc::new(crate::tenancy::TenantRuntime {
+            label: crate::tenancy::DEFAULT_TENANT_ID.to_string(),
+            template_metadata: crate::tenancy::TenantTemplateMetadata {
+                id: crate::tenancy::DEFAULT_TENANT_ID.to_string(),
+                ..crate::tenancy::TenantTemplateMetadata::default()
+            },
+            registry: Arc::new(registry),
+            requires_key: false,
+            management_auth_header: "x-tenant-admin-key".to_string(),
+            management_auth_secret: None,
+            latency: crate::config::LatencyConfig::default(),
+            chaos: crate::config::ChaosConfig::default(),
+        }),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        std::collections::HashSet::new(),
+        std::collections::HashSet::new(),
+    ))))
+}
+
+/// Regression: when a streaming request triggers an error-status path and the
+/// response_body contains an invalid Tera template, the handler must return
+/// HTTP 500 with an error message, not HTTP <status> with a silently empty body
+/// (which was the previous unwrap_or_default() behaviour).
+#[tokio::test]
+async fn test_streaming_error_status_render_failure_returns_500() {
+    // Provider is configured to always return 422 and render the response_body
+    // as the error body — but the body is an intentionally broken Tera template.
+    let store = make_streaming_store_with_status_and_body(
+        "{{ broken_template", // invalid Tera — unclosed tag
+        Some("422"),
+    );
+
+    let app = create_app(get_test_config(), None, store).await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"stream":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a broken error-status body template inside the streaming path must return 500, \
+         not the error status with a silently empty body"
+    );
+    let body_text = String::from_utf8(drain_body(resp).await).unwrap();
+    assert!(
+        !body_text.is_empty(),
+        "error response body must not be empty"
+    );
+    assert!(
+        !body_text.starts_with("data:"),
+        "error response must not be an SSE stream; got:\n{}",
+        body_text
+    );
+}
+
+/// Regression: a valid streaming error-status path (where the response_body
+/// renders successfully) must return the configured error status with a JSON
+/// body, not start an SSE stream.
+#[tokio::test]
+async fn test_streaming_error_status_with_valid_template_returns_json_error() {
+    // Provider configured to return 422. response_body is a plain JSON string
+    // with no Tera variables so it renders cleanly in both the pre-stream phase
+    // and the error-body phase. The handler must return the 422 status with
+    // the body as JSON, not as an SSE stream.
+    let store = make_streaming_store_with_status_and_body(
+        r#"{"error":{"code":422,"message":"unprocessable"}}"#,
+        Some("422"),
+    );
+
+    let app = create_app(get_test_config(), None, store).await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"stream":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "streaming error-status with valid body template must return the configured status code"
+    );
+    let body_text = String::from_utf8(drain_body(resp).await).unwrap();
+    let body: serde_json::Value = serde_json::from_str(&body_text)
+        .expect("error response body must be valid JSON");
+    assert_eq!(body["error"]["code"], 422);
+    assert!(
+        !body_text.starts_with("data:"),
+        "error body must not be SSE-framed"
+    );
+}
+
+/// Regression: reload_requires_restart must detect changes to tenancy config
+/// (mode, tenant_header, admin_auth) so tenancy drift cannot silently pass
+/// through a live reload.
+#[test]
+fn test_reload_requires_restart_detects_tenancy_change() {
+    use crate::config::AppConfig;
+    use crate::tenancy::{AdminAuthConfig, TenancyConfig, TenancyMode};
+    use std::path::PathBuf;
+
+    let base = AppConfig {
+        host: "0.0.0.0".to_string(),
+        port: 8100,
+        workers: 1,
+        log_level: "info".to_string(),
+        config_dir: PathBuf::from("config"),
+        tenancy: TenancyConfig {
+            mode: TenancyMode::Single,
+            tenants_dir: PathBuf::from("tenants"),
+            tenant_header: "x-tenant".to_string(),
+            admin_auth: AdminAuthConfig::default(),
+        },
+        latency: crate::config::LatencyConfig::default(),
+        chaos: crate::config::ChaosConfig::default(),
+        endpoints: vec![],
+        response_file: None,
+        reload_args: None,
+    };
+
+    // No change — no restart required.
+    assert!(
+        base.reload_requires_restart(&base).is_empty(),
+        "identical config must not require restart"
+    );
+
+    // Tenant header renamed.
+    let mut changed_header = base.clone();
+    changed_header.tenancy.tenant_header = "x-org".to_string();
+    let fields = base.reload_requires_restart(&changed_header);
+    assert!(
+        fields.contains(&"tenancy"),
+        "changing tenant_header must require restart; got {:?}",
+        fields
+    );
+
+    // Tenancy mode switched.
+    let mut changed_mode = base.clone();
+    changed_mode.tenancy.mode = TenancyMode::Multi;
+    let fields = base.reload_requires_restart(&changed_mode);
+    assert!(
+        fields.contains(&"tenancy"),
+        "changing tenancy mode must require restart; got {:?}",
+        fields
+    );
+
+    // Admin auth header renamed.
+    let mut changed_auth = base.clone();
+    changed_auth.tenancy.admin_auth.header = "x-root".to_string();
+    let fields = base.reload_requires_restart(&changed_auth);
+    assert!(
+        fields.contains(&"tenancy"),
+        "changing admin_auth header must require restart; got {:?}",
+        fields
+    );
+}
+
+/// Regression: log_level = "off" must map to LevelFilter::OFF.
+/// Tests the actual `level_filter_from_str` function used in main.rs so the
+/// test is not brittle to mapping changes.
+#[test]
+fn test_log_level_off_maps_to_level_filter_off() {
+    use tracing_subscriber::filter::LevelFilter;
+
+    let cases: &[(&str, LevelFilter)] = &[
+        ("off", LevelFilter::OFF),
+        ("error", LevelFilter::ERROR),
+        ("warn", LevelFilter::WARN),
+        ("info", LevelFilter::INFO),
+        ("debug", LevelFilter::DEBUG),
+        ("unknown", LevelFilter::INFO), // unknown falls back to INFO
+        ("OFF", LevelFilter::OFF),      // case-insensitive
+    ];
+
+    for (input, expected) in cases {
+        let actual = crate::level_filter_from_str(input);
+        assert_eq!(
+            actual, *expected,
+            "log_level '{}' must map to {:?}, got {:?}",
+            input, expected, actual
+        );
+    }
+}
