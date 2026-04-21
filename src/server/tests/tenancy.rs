@@ -2735,3 +2735,111 @@ async fn test_single_mode_tenant_management_requires_admin_auth() {
 
     fs::remove_dir_all(temp_base).unwrap();
 }
+
+fn write_echo_endpoint_config(config: &mut AppConfig) {
+    config.endpoints.push(crate::config::EndpointConfig {
+        path: "/echo".to_string(),
+        format: "echo".to_string(),
+        content_type: None,
+    });
+}
+
+/// M-1 regression: echo endpoints must pass real query params to tenant
+/// resolution so tenants whose only API key is source=query can be reached.
+/// Previously echo_handler hard-coded an empty HashMap, making query-keyed
+/// tenants always fall back to the default tenant regardless of the key in
+/// the URL. Verify by checking that the resolved tenant label in the
+/// response metrics matches "acme", not the default.
+#[tokio::test]
+async fn test_echo_handler_resolves_tenant_from_query_key() {
+    let temp_base = management_test_base("test_echo_query_key_tenant_resolution");
+    write_tenant_metadata(
+        &temp_base,
+        "acme",
+        r#"
+id = "acme"
+
+[[keys]]
+source = "query"
+name = "api_key"
+value = "secret-acme"
+"#,
+    );
+
+    let mut config = AppConfig {
+        host: "127.0.0.1".to_string(),
+        port: 0,
+        workers: 1,
+        log_level: "debug".to_string(),
+        config_dir: PathBuf::from("config"),
+        tenancy: TenancyConfig {
+            mode: TenancyMode::Multi,
+            tenants_dir: temp_base.join("tenants"),
+            tenant_header: "x-tenant".to_string(),
+            admin_auth: AdminAuthConfig::default(),
+        },
+        latency: crate::config::LatencyConfig::default(),
+        chaos: crate::config::ChaosConfig::default(),
+        endpoints: vec![crate::config::EndpointConfig {
+            path: "/v1/chat/completions".to_string(),
+            format: "openai".to_string(),
+            content_type: None,
+        }],
+        response_file: None,
+        reload_args: None,
+    };
+    write_echo_endpoint_config(&mut config);
+
+    let app = create_app(
+        config.clone(),
+        None,
+        Arc::new(TenantStoreHandle::new(
+            build_runtime_store(&config).unwrap(),
+        )),
+    )
+    .await;
+
+    // With the correct query key the echo endpoint must resolve the tenant and
+    // return 200 with the request body mirrored back.
+    let body_content = r#"{"hello":"world"}"#;
+    let ok_response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/echo?api_key=secret-acme")
+                .body(Body::from(body_content))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        ok_response.status(),
+        StatusCode::OK,
+        "echo with valid query key must resolve tenant and return 200"
+    );
+
+    // Verify the ACME tenant was resolved, not the default fallback.
+    // Previously the empty query_params map caused the acme key to be ignored
+    // and the request fell through to the default tenant instead.
+    let metrics = ok_response
+        .extensions()
+        .get::<TenantRequestMetrics>()
+        .cloned()
+        .expect("echo response must carry tenant metrics");
+    match metrics {
+        TenantRequestMetrics::Accepted { tenant } => {
+            assert_eq!(
+                tenant, "acme",
+                "query key on echo endpoint must resolve to acme, not the default tenant"
+            );
+        }
+        TenantRequestMetrics::Rejected { reason } => {
+            panic!("expected accepted tenant, got rejection: {}", reason);
+        }
+    }
+
+    // Confirm the body was echoed back unmodified.
+    assert_eq!(response_text(ok_response).await, body_content);
+
+    fs::remove_dir_all(temp_base).unwrap();
+}

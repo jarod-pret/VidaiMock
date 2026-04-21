@@ -236,6 +236,11 @@ impl AppConfig {
     }
 
     pub fn validate(&self) -> Result<(), config::ConfigError> {
+        if self.workers == 0 {
+            return Err(config::ConfigError::Message(
+                "workers must be at least 1".to_string(),
+            ));
+        }
         self.tenancy
             .validate()
             .map_err(config::ConfigError::Message)
@@ -656,5 +661,20 @@ tenants_dir = "{}"
 
         let changed = current.reload_requires_restart(&next);
         assert_eq!(changed, vec!["latency", "endpoints"]);
+    }
+
+    /// S-2 regression: workers = 0 must fail config validation with a clear
+    /// message instead of panicking inside tokio::runtime::Builder.
+    #[test]
+    fn test_workers_zero_fails_validation() {
+        let mut config = AppConfig::build_config(Cli::parse_from(&["mock-server"])).unwrap();
+        config.workers = 0;
+        let err = config.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("workers must be at least 1"),
+            "validation error should mention workers; got: {}",
+            msg
+        );
     }
 }
