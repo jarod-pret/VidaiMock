@@ -197,6 +197,8 @@ async fn track_metrics(req: Request, next: Next) -> impl IntoResponse {
 
     let response = next.run(req).await;
 
+    // This measures handler time until the response object is returned.
+    // For streaming responses it is closer to setup/TTFB than full body drain.
     let latency = start.elapsed().as_secs_f64();
     let status = response.status().as_u16().to_string();
 

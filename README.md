@@ -224,6 +224,7 @@ Resolution rules:
 - Tenant key sources supported in config are `header` and `query`; `host` and `path` are rejected during validation.
 - Accepted requests use tenant-labelled metrics.
 - Rejected requests use separate rejection metrics.
+- Request duration metrics measure handler time until the response object is returned; for streaming routes they are closer to response setup / TTFB than full stream drain time.
 
 ## 🔐 Management Endpoints
 
@@ -242,6 +243,10 @@ Tenant self-management lives under `/tenant/` and uses tenant-admin auth, not gl
 
 Normal tenant request keys stay on the mock traffic path only. Tenant self-management uses a separate tenant-local `management_auth` secret in `tenants/<id>/tenant.toml`, with `value_file` preferred over `value_env`, and `value_env` preferred over inline `value`.
 
+Relative `value_file` paths resolve from the owning config file:
+- `mock-server.toml` paths resolve relative to that file's directory
+- `tenants/<id>/tenant.toml` paths resolve relative to that tenant metadata file's directory
+
 By default the tenant-admin header is `x-tenant-admin-key`, and it can be overridden per tenant if needed.
 
 Tenant-admin credentials must be unique across tenants for each effective header+secret pair. Reusing the same secret under different tenant-admin headers is treated as a different identity, but sharing the same header+secret across tenants is rejected during validation and reload.
@@ -257,6 +262,7 @@ In single mode there is no tenant-local management auth surface, so `/tenant/*` 
 `POST /admin/reload` re-runs startup config loading from the original startup source, then rebuilds the live tenancy, admin-auth, provider, and template runtime atomically.
 
 - Reload validates before activation.
+- Invalid provider YAML or template syntax rejects the reload instead of being skipped.
 - Failed reload keeps the previous working runtime active.
 - It refreshes the live tenancy/admin/provider/template runtime, not the whole process shape.
 - Changes to process-shaped settings such as `host`, `port`, `workers`, `log_level`, `latency`, `chaos`, `endpoints`, and `response_file` are rejected at reload time and still require a restart.
@@ -265,6 +271,7 @@ In single mode there is no tenant-local management auth surface, so `/tenant/*` 
 `POST /tenant/reload` refreshes only the resolved tenant.
 
 - It rebuilds that tenant's runtime, request-auth lookup state, and tenant-admin auth state.
+- Invalid tenant provider YAML or template syntax rejects that tenant reload.
 - It does not reload every tenant.
 - Failed tenant reload keeps the previous working tenant state active.
 

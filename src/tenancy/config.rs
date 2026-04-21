@@ -203,6 +203,10 @@ pub(crate) struct DiscoveredTenants {
 }
 
 impl TenancyConfig {
+    pub fn normalize_secret_paths(&mut self, base_dir: &Path) {
+        self.admin_auth.normalize_value_file(base_dir);
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         self.admin_auth.validate()?;
         if self.mode == TenancyMode::Multi {
@@ -489,14 +493,14 @@ impl TenancyConfig {
                         &mut seen_header_values,
                         normalized,
                         tenant,
-                        key.describe(&resolved_value),
+                        key.describe(),
                     )?;
                 } else {
                     register_lookup(
                         &mut seen_api_keys,
                         normalized,
                         tenant,
-                        key.describe(&resolved_value),
+                        key.describe(),
                     )?;
                 }
             }
@@ -539,6 +543,10 @@ impl TenancyConfig {
 }
 
 impl AdminAuthConfig {
+    pub fn normalize_value_file(&mut self, base_dir: &Path) {
+        normalize_relative_secret_path(&mut self.value_file, base_dir);
+    }
+
     pub fn resolved_value(&self) -> Result<Option<String>, String> {
         if self.value_file.is_none() && self.value_env.is_none() && self.value.trim().is_empty() {
             return Ok(None);
@@ -564,6 +572,10 @@ impl AdminAuthConfig {
 }
 
 impl TenantManagementAuthConfig {
+    pub fn normalize_value_file(&mut self, base_dir: &Path) {
+        normalize_relative_secret_path(&mut self.value_file, base_dir);
+    }
+
     pub fn resolved_value(&self) -> Result<Option<String>, String> {
         if self.value_file.is_none() && self.value_env.is_none() && self.value.trim().is_empty() {
             return Ok(None);
@@ -593,6 +605,16 @@ impl TenantManagementAuthConfig {
 }
 
 impl TenantConfig {
+    pub fn normalize_secret_paths(&mut self, base_dir: &Path) {
+        for key in &mut self.keys {
+            key.normalize_value_file(base_dir);
+        }
+
+        if let Some(management_auth) = self.management_auth.as_mut() {
+            management_auth.normalize_value_file(base_dir);
+        }
+    }
+
     pub fn template_metadata(&self) -> TenantTemplateMetadata {
         // Template context gets only safe tenant metadata, never auth or key material.
         TenantTemplateMetadata {
@@ -689,6 +711,10 @@ impl TenantChaosPolicy {
 }
 
 impl TenantKeyConfig {
+    pub fn normalize_value_file(&mut self, base_dir: &Path) {
+        normalize_relative_secret_path(&mut self.value_file, base_dir);
+    }
+
     pub fn supports_runtime_resolution(&self, tenant_header: &str) -> bool {
         matches!(
             self.source,
@@ -711,8 +737,8 @@ impl TenantKeyConfig {
         )
     }
 
-    fn describe(&self, resolved_value: &str) -> String {
-        format!("{:?} '{}={}'", self.source, self.name, resolved_value)
+    fn describe(&self) -> String {
+        format!("{:?} '{}'", self.source, self.name)
     }
 }
 
@@ -840,7 +866,7 @@ fn resolve_secret_value(
 }
 
 fn load_tenant_metadata_file(path: &Path) -> Result<TenantConfig, String> {
-    config::Config::builder()
+    let mut tenant: TenantConfig = config::Config::builder()
         .add_source(config::File::from(path.to_path_buf()))
         .build()
         .map_err(|error| {
@@ -857,7 +883,17 @@ fn load_tenant_metadata_file(path: &Path) -> Result<TenantConfig, String> {
                 path.display(),
                 error
             )
-        })
+        })?;
+    tenant.normalize_secret_paths(path.parent().unwrap_or_else(|| Path::new(".")));
+    Ok(tenant)
+}
+
+fn normalize_relative_secret_path(path: &mut Option<PathBuf>, base_dir: &Path) {
+    if let Some(path_buf) = path.as_mut() {
+        if path_buf.is_relative() {
+            *path_buf = base_dir.join(path_buf.clone());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1015,6 +1051,48 @@ value = "shared"
 
         let error = tenancy.validate().unwrap_err();
         assert!(error.contains("ambiguous tenant key match"));
+
+        fs::remove_dir_all(temp_base).unwrap();
+    }
+
+    #[test]
+    fn ambiguous_tenant_key_errors_redact_secret_values() {
+        let temp_base = unique_test_dir("ambiguous_tenant_keys_redacted");
+        write_tenant_metadata(
+            &temp_base,
+            "acme",
+            r#"
+id = "acme"
+
+[[keys]]
+source = "header"
+name = "x-api-key"
+value = "shared-secret"
+"#,
+        );
+        write_tenant_metadata(
+            &temp_base,
+            "globex",
+            r#"
+id = "globex"
+
+[[keys]]
+source = "header"
+name = "x-api-key"
+value = "shared-secret"
+"#,
+        );
+
+        let tenancy = TenancyConfig {
+            mode: TenancyMode::Multi,
+            tenants_dir: temp_base.join("tenants"),
+            tenant_header: default_tenant_header(),
+            admin_auth: AdminAuthConfig::default(),
+        };
+
+        let error = tenancy.validate().unwrap_err();
+        assert!(error.contains("x-api-key"));
+        assert!(!error.contains("shared-secret"));
 
         fs::remove_dir_all(temp_base).unwrap();
     }
@@ -1254,5 +1332,44 @@ value = "secret-default"
         assert!(management_auth.get("value").is_none());
         assert!(management_auth.get("value_file").is_none());
         assert!(management_auth.get("value_env").is_none());
+    }
+
+    #[test]
+    fn tenant_value_file_paths_are_resolved_relative_to_tenant_metadata() {
+        let temp_base = unique_test_dir("tenant_value_file_relative_to_metadata");
+        let secret_path = temp_base.join("tenants/acme/secrets/acme.key");
+        fs::create_dir_all(secret_path.parent().unwrap()).unwrap();
+        fs::write(&secret_path, "secret-acme").unwrap();
+        write_tenant_metadata(
+            &temp_base,
+            "acme",
+            r#"
+id = "acme"
+
+[[keys]]
+source = "header"
+name = "x-api-key"
+value_file = "secrets/acme.key"
+"#,
+        );
+
+        let tenancy = TenancyConfig {
+            mode: TenancyMode::Multi,
+            tenants_dir: temp_base.join("tenants"),
+            tenant_header: default_tenant_header(),
+            admin_auth: AdminAuthConfig::default(),
+        };
+
+        let tenant = tenancy.load_named_tenant("acme").unwrap();
+        assert_eq!(
+            tenant.keys[0].value_file.as_ref().unwrap(),
+            &temp_base.join("tenants/acme/secrets/acme.key")
+        );
+        assert_eq!(
+            tenant.api_keys(&tenancy.normalized_tenant_header()).unwrap()[0].value,
+            "secret-acme"
+        );
+
+        fs::remove_dir_all(temp_base).unwrap();
     }
 }

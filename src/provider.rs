@@ -318,11 +318,10 @@ impl ProviderRegistry {
         // b. Add all collected templates to Tera
         for (name, content) in template_map {
             // Register with the relative name (e.g., openai/chat.json.j2)
-            if let Err(e) = tera.add_raw_template(&name, &content) {
-                tracing::error!("Failed to parse template '{}': {:?}", name, e);
-            } else {
-                tracing::debug!("Registered template: {}", name);
-            }
+            tera.add_raw_template(&name, &content).map_err(|error| {
+                std::io::Error::other(format!("failed to parse template '{}': {}", name, error))
+            })?;
+            tracing::debug!("Registered template: {}", name);
 
             // Also register with config/templates/ prefix for compatibility with some provider configs
             let full_name = format!("config/templates/{}", name);
@@ -340,10 +339,16 @@ impl ProviderRegistry {
             if file.starts_with("providers/") && file.ends_with(".yaml") {
                 if let Some(content) = Asset::get(&file) {
                     let config_str = std::str::from_utf8(content.data.as_ref())?;
-                    if let Ok(config) = serde_yaml::from_str::<ProviderConfig>(config_str) {
-                        tracing::debug!("Discovered embedded provider: {}", config.name);
-                        provider_map.insert(file["providers/".len()..].to_string(), config);
-                    }
+                    let config = serde_yaml::from_str::<ProviderConfig>(config_str).map_err(
+                        |error| {
+                            std::io::Error::other(format!(
+                                "failed to parse embedded provider '{}': {}",
+                                file, error
+                            ))
+                        },
+                    )?;
+                    tracing::debug!("Discovered embedded provider: {}", config.name);
+                    provider_map.insert(file["providers/".len()..].to_string(), config);
                 }
             }
         }
@@ -356,17 +361,24 @@ impl ProviderRegistry {
                     if let Ok(path) = entry {
                         if path.is_file() {
                             let content = fs::read_to_string(&path)?;
-                            if let Ok(config) = serde_yaml::from_str::<ProviderConfig>(&content) {
-                                tracing::debug!(
-                                    "Discovered disk provider: {} ({})",
-                                    config.name,
-                                    path.display()
-                                );
-                                provider_map.insert(
-                                    path.file_name().unwrap().to_str().unwrap().to_string(),
-                                    config,
-                                );
-                            }
+                            let config = serde_yaml::from_str::<ProviderConfig>(&content).map_err(
+                                |error| {
+                                    std::io::Error::other(format!(
+                                        "failed to parse provider '{}': {}",
+                                        path.display(),
+                                        error
+                                    ))
+                                },
+                            )?;
+                            tracing::debug!(
+                                "Discovered disk provider: {} ({})",
+                                config.name,
+                                path.display()
+                            );
+                            provider_map.insert(
+                                path.file_name().unwrap().to_str().unwrap().to_string(),
+                                config,
+                            );
                         }
                     }
                 }

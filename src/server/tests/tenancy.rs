@@ -1900,6 +1900,179 @@ async fn test_failed_tenant_reload_keeps_previous_runtime_active() {
 }
 
 #[tokio::test]
+async fn test_malformed_tenant_provider_reload_keeps_previous_runtime_active() {
+    let temp_base = management_test_base("test_malformed_tenant_provider_reload_keeps_runtime");
+    write_provider(
+        &temp_base.join("tenants/default/providers/openai.yaml"),
+        r#"{"tenant":"default"}"#,
+    );
+    write_provider(
+        &temp_base.join("tenants/acme/providers/openai.yaml"),
+        r#"{"tenant":"acme-before"}"#,
+    );
+    write_provider(
+        &temp_base.join("tenants/globex/providers/openai.yaml"),
+        r#"{"tenant":"globex"}"#,
+    );
+
+    let config = managed_multi_tenant_config(&temp_base);
+    let app = create_app(
+        config.clone(),
+        None,
+        Arc::new(TenantStoreHandle::new(
+            build_runtime_store(&config).unwrap(),
+        )),
+    )
+    .await;
+
+    let before = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("x-api-key", "secret-acme")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(response_text(before).await.contains("acme-before"));
+
+    fs::write(
+        temp_base.join("tenants/acme/providers/openai.yaml"),
+        "name: [broken-provider",
+    )
+    .unwrap();
+
+    let reload = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/tenant/reload")
+                .header("x-tenant-admin-key", "tenant-admin-acme")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reload.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let after_failed_reload = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("x-api-key", "secret-acme")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(response_text(after_failed_reload)
+        .await
+        .contains("acme-before"));
+
+    fs::remove_dir_all(temp_base).unwrap();
+}
+
+#[tokio::test]
+async fn test_malformed_tenant_template_reload_keeps_previous_runtime_active() {
+    let temp_base = management_test_base("test_malformed_tenant_template_reload_keeps_runtime");
+    write_provider(
+        &temp_base.join("tenants/default/providers/openai.yaml"),
+        r#"{"tenant":"default"}"#,
+    );
+    fs::create_dir_all(temp_base.join("tenants/acme/providers")).unwrap();
+    fs::write(
+        temp_base.join("tenants/acme/providers/openai.yaml"),
+        r#"
+name: "acme-template"
+matcher: "^/v1/chat/completions$"
+response_template: "openai/custom.json.j2"
+priority: 100
+"#,
+    )
+    .unwrap();
+    fs::create_dir_all(temp_base.join("tenants/acme/templates/openai")).unwrap();
+    fs::write(
+        temp_base.join("tenants/acme/templates/openai/custom.json.j2"),
+        r#"{"tenant":"acme-before"}"#,
+    )
+    .unwrap();
+    write_provider(
+        &temp_base.join("tenants/globex/providers/openai.yaml"),
+        r#"{"tenant":"globex"}"#,
+    );
+
+    let config = managed_multi_tenant_config(&temp_base);
+    let app = create_app(
+        config.clone(),
+        None,
+        Arc::new(TenantStoreHandle::new(
+            build_runtime_store(&config).unwrap(),
+        )),
+    )
+    .await;
+
+    let before = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("x-api-key", "secret-acme")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(response_text(before).await.contains("acme-before"));
+
+    fs::write(
+        temp_base.join("tenants/acme/templates/openai/custom.json.j2"),
+        "{% if %}",
+    )
+    .unwrap();
+
+    let reload = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/tenant/reload")
+                .header("x-tenant-admin-key", "tenant-admin-acme")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reload.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let after_failed_reload = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("x-api-key", "secret-acme")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(response_text(after_failed_reload)
+        .await
+        .contains("acme-before"));
+
+    fs::remove_dir_all(temp_base).unwrap();
+}
+
+#[tokio::test]
 async fn test_tenant_reload_collision_fails_and_keeps_previous_runtime_and_auth_state() {
     let temp_base = management_test_base("test_tenant_reload_collision_keeps_runtime");
     write_provider(

@@ -20,6 +20,7 @@
 use clap::Parser;
 use config::{Config, File};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::path::PathBuf;
 
 use crate::tenancy::TenancyConfig;
@@ -130,6 +131,11 @@ impl AppConfig {
 
     pub fn build_config(args: Cli) -> Result<Self, config::ConfigError> {
         let reload_args = args.clone();
+        let config_base_dir = args
+            .config
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
         let mut settings = Config::builder()
             // Start with defaults
             .set_default("port", 8100_i64)?
@@ -210,6 +216,9 @@ impl AppConfig {
             }
         }
 
+        config
+            .tenancy
+            .normalize_secret_paths(&config_base_dir);
         config.validate()?;
         config.reload_args = Some(reload_args);
 
@@ -486,6 +495,45 @@ tenants_dir = "{}"
         let error = AppConfig::build_config(args).unwrap_err();
 
         assert!(error.to_string().contains("duplicate tenant id"));
+
+        fs::remove_dir_all(temp_base).unwrap();
+    }
+
+    #[test]
+    fn test_admin_auth_value_file_is_resolved_relative_to_config_file() {
+        let temp_base = unique_test_dir("test_admin_auth_value_file_relative_to_config");
+        let temp_path = temp_base.join("mock-server.toml");
+        fs::create_dir_all(temp_base.join("secrets")).unwrap();
+        fs::write(temp_base.join("secrets/admin.key"), "admin-secret").unwrap();
+        fs::write(
+            &temp_path,
+            r#"
+port = 8100
+workers = 1
+log_level = "debug"
+config_dir = "config"
+
+[tenancy]
+mode = "single"
+
+[tenancy.admin_auth]
+header = "x-admin-key"
+value_file = "secrets/admin.key"
+"#,
+        )
+        .unwrap();
+
+        let args = Cli::parse_from(&["mock-server", "--config", temp_path.to_str().unwrap()]);
+        let config = AppConfig::build_config(args).unwrap();
+
+        assert_eq!(
+            config.tenancy.admin_auth.resolved_value().unwrap(),
+            Some("admin-secret".to_string())
+        );
+        assert_eq!(
+            config.tenancy.admin_auth.value_file.as_ref().unwrap(),
+            &temp_base.join("secrets/admin.key")
+        );
 
         fs::remove_dir_all(temp_base).unwrap();
     }

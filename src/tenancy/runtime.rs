@@ -21,7 +21,7 @@ use arc_swap::ArcSwap;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::config::{AppConfig, ChaosConfig, LatencyConfig};
 use crate::provider::{build_registry_from_layers, ProviderRegistry};
@@ -62,6 +62,7 @@ pub struct TenantStore {
 
 pub struct TenantStoreHandle {
     current: ArcSwap<TenantStore>,
+    reload_lock: Mutex<()>,
 }
 
 impl TenantStore {
@@ -132,6 +133,7 @@ impl TenantStoreHandle {
     pub fn new(initial: Arc<TenantStore>) -> Self {
         Self {
             current: ArcSwap::from(initial),
+            reload_lock: Mutex::new(()),
         }
     }
 
@@ -140,12 +142,14 @@ impl TenantStoreHandle {
     }
 
     pub fn reload_all(&self, config: &AppConfig) -> Result<Arc<TenantStore>, Box<dyn Error>> {
+        let _guard = self.lock_reload_guard();
         let rebuilt = build_runtime_store(config)?;
         self.current.store(rebuilt.clone());
         Ok(rebuilt)
     }
 
     pub fn reload_tenant(&self, tenant_id: &str) -> Result<Arc<TenantStore>, Box<dyn Error>> {
+        let _guard = self.lock_reload_guard();
         let current = self.current();
         let updated = match current.mode {
             TenancyMode::Single => reload_single_mode_store(&current, tenant_id)?,
@@ -154,6 +158,10 @@ impl TenantStoreHandle {
 
         self.current.store(updated.clone());
         Ok(updated)
+    }
+
+    fn lock_reload_guard(&self) -> MutexGuard<'_, ()> {
+        self.reload_lock.lock().unwrap_or_else(|poison| poison.into_inner())
     }
 }
 
@@ -637,12 +645,11 @@ fn register_key_lookup_value(
     if let Some(existing_tenant_id) = key_lookup.get(&resolved_key) {
         if existing_tenant_id != tenant_id {
             return Err(format!(
-                "ambiguous tenant key match between '{}' and '{}' on {:?} '{}={}'",
+                "ambiguous tenant key match between '{}' and '{}' on {:?} '{}'",
                 existing_tenant_id,
                 tenant_id,
                 resolved_key.source,
                 resolved_key.name,
-                resolved_key.value
             )
             .into());
         }
@@ -650,4 +657,186 @@ fn register_key_lookup_value(
 
     key_lookup.insert(resolved_key, tenant_id.to_string());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{EndpointConfig, LatencyConfig};
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_test_dir(name: &str) -> PathBuf {
+        std::env::current_dir().unwrap().join(format!(
+            "target/{}_{}",
+            name,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn write_tenant_metadata(base_dir: &std::path::Path, tenant_id: &str, body: &str) {
+        let metadata_path = base_dir.join("tenants").join(tenant_id).join("tenant.toml");
+        fs::create_dir_all(metadata_path.parent().unwrap()).unwrap();
+        fs::write(metadata_path, body).unwrap();
+    }
+
+    fn write_provider(path: &std::path::Path, provider_name: &str) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            path,
+            format!(
+                "name: \"{provider_name}\"\nmatcher: \"^/v1/chat/completions$\"\nresponse_body: '{{\"tenant\":\"{provider_name}\"}}'\npriority: 100\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    fn runtime_test_config(base_dir: &std::path::Path) -> AppConfig {
+        AppConfig {
+            host: "127.0.0.1".to_string(),
+            port: 0,
+            workers: 1,
+            log_level: "debug".to_string(),
+            config_dir: base_dir.join("config"),
+            tenancy: TenancyConfig {
+                mode: TenancyMode::Multi,
+                tenants_dir: base_dir.join("tenants"),
+                tenant_header: "x-tenant".to_string(),
+                admin_auth: AdminAuthConfig::default(),
+            },
+            latency: LatencyConfig::default(),
+            chaos: ChaosConfig::default(),
+            endpoints: vec![EndpointConfig {
+                path: "/v1/chat/completions".to_string(),
+                format: "openai".to_string(),
+                content_type: None,
+            }],
+            response_file: None,
+            reload_args: None,
+        }
+    }
+
+    fn tenant_provider_name(store: &TenantStore, tenant_id: &str) -> String {
+        store.tenant_by_id(tenant_id)
+            .unwrap()
+            .registry
+            .providers
+            .first()
+            .unwrap()
+            .name
+            .clone()
+    }
+
+    #[test]
+    fn concurrent_tenant_reloads_preserve_each_successful_update() {
+        let temp_base = unique_test_dir("concurrent_tenant_reloads_preserve_updates");
+        write_tenant_metadata(&temp_base, "acme", "id = \"acme\"\n");
+        write_tenant_metadata(&temp_base, "globex", "id = \"globex\"\n");
+        write_provider(
+            &temp_base.join("tenants/acme/providers/openai.yaml"),
+            "acme-before",
+        );
+        write_provider(
+            &temp_base.join("tenants/globex/providers/openai.yaml"),
+            "globex-before",
+        );
+
+        let config = runtime_test_config(&temp_base);
+        let handle = Arc::new(TenantStoreHandle::new(build_runtime_store(&config).unwrap()));
+
+        write_provider(
+            &temp_base.join("tenants/acme/providers/openai.yaml"),
+            "acme-after",
+        );
+        write_provider(
+            &temp_base.join("tenants/globex/providers/openai.yaml"),
+            "globex-after",
+        );
+
+        let guard = handle.lock_reload_guard();
+
+        let acme_handle = Arc::clone(&handle);
+        let acme_thread = std::thread::spawn(move || acme_handle.reload_tenant("acme").unwrap());
+
+        let globex_handle = Arc::clone(&handle);
+        let globex_thread =
+            std::thread::spawn(move || globex_handle.reload_tenant("globex").unwrap());
+
+        drop(guard);
+
+        acme_thread.join().unwrap();
+        globex_thread.join().unwrap();
+
+        let current = handle.current();
+        assert_eq!(tenant_provider_name(&current, "acme"), "acme-after");
+        assert_eq!(tenant_provider_name(&current, "globex"), "globex-after");
+
+        fs::remove_dir_all(temp_base).unwrap();
+    }
+
+    #[test]
+    fn tenant_reload_errors_do_not_include_resolved_secret_values() {
+        let temp_base = unique_test_dir("tenant_reload_redacts_secret_values");
+        write_tenant_metadata(
+            &temp_base,
+            "acme",
+            r#"
+id = "acme"
+
+[[keys]]
+source = "header"
+name = "x-api-key"
+value = "secret-acme"
+"#,
+        );
+        write_tenant_metadata(
+            &temp_base,
+            "globex",
+            r#"
+id = "globex"
+
+[[keys]]
+source = "header"
+name = "x-api-key"
+value = "secret-globex"
+"#,
+        );
+        write_provider(
+            &temp_base.join("tenants/acme/providers/openai.yaml"),
+            "acme-before",
+        );
+        write_provider(
+            &temp_base.join("tenants/globex/providers/openai.yaml"),
+            "globex-before",
+        );
+
+        let config = runtime_test_config(&temp_base);
+        let handle = TenantStoreHandle::new(build_runtime_store(&config).unwrap());
+
+        write_tenant_metadata(
+            &temp_base,
+            "acme",
+            r#"
+id = "acme"
+
+[[keys]]
+source = "header"
+name = "x-api-key"
+value = "secret-globex"
+"#,
+        );
+
+        let error = match handle.reload_tenant("acme") {
+            Ok(_) => panic!("reload should fail when tenant keys collide"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("x-api-key"));
+        assert!(!error.contains("secret-acme"));
+        assert!(!error.contains("secret-globex"));
+
+        fs::remove_dir_all(temp_base).unwrap();
+    }
 }
