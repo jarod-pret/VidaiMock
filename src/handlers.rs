@@ -555,7 +555,7 @@ pub async fn mock_handler(
 
         // Resolve status before rendering so provider error templates can
         // switch on the effective status code.
-        let (status, source) = resolve_status_code(
+        let (status, _) = resolve_status_code(
             chaos,
             &headers,
             &query_params,
@@ -566,7 +566,6 @@ pub async fn mock_handler(
         context.insert("status_code", &status.as_u16());
 
         let is_error_status = status.is_client_error() || status.is_server_error();
-        let _ = source;
         let chosen_template_path = if is_error_status {
             provider
                 .error_template
@@ -755,14 +754,30 @@ async fn streaming_handler_inner(
                 base_context.insert(key, &val);
             }
 
-            // Simulate chunks (for now, still split by whitespace until we implement better tokenization/generation)
+            // Render the full response body up front so the stream can extract
+            // chunks from it. A render failure here means no valid content is
+            // available — return 500 immediately instead of starting an SSE
+            // stream that would deliver an HTTP 200 with no content chunks.
             let full_response = if let Some(template_path) = &provider.response_template {
-                registry
-                    .tera
-                    .render(template_path, &base_context)
-                    .unwrap_or_default()
+                match registry.tera.render(template_path, &base_context) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return response_with_metrics(
+                            internal_error_response("Stream render failed", e),
+                            resolution.metrics,
+                        );
+                    }
+                }
             } else if let Some(body) = &provider.response_body {
-                registry.render_str(body, &base_context).unwrap_or_default()
+                match registry.render_str(body, &base_context) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return response_with_metrics(
+                            internal_error_response("Stream render failed", e),
+                            resolution.metrics,
+                        );
+                    }
+                }
             } else {
                 String::new()
             };
@@ -793,7 +808,7 @@ async fn streaming_handler_inner(
                 streaming_chaos_defaults(&resolution.tenant, &headers);
 
             let registry_inner = registry.clone();
-            let (stream_status, stream_source) = resolve_status_code(
+            let (stream_status, _) = resolve_status_code(
                 stream_chaos,
                 &headers,
                 &query_params,
@@ -810,7 +825,6 @@ async fn streaming_handler_inner(
             // validation (VM-007: Anthropic max_tokens missing -> 400).
             let is_error_status =
                 stream_status.is_client_error() || stream_status.is_server_error();
-            let _ = stream_source; // currently unused; kept for future splits
             if is_error_status {
                 base_context.insert("status_code", &stream_status.as_u16());
                 let chosen_template = provider
@@ -1222,9 +1236,9 @@ fn extract_content_value(json_str: &str) -> (serde_json::Value, bool) {
 pub async fn echo_handler(
     Extension(state): Extension<Arc<AppState>>,
     headers: HeaderMap,
+    Query(query_params): Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Response {
-    let query_params = HashMap::new();
     let resolution = match resolve_tenant_or_reject(&state, &headers, &query_params) {
         Ok(resolution) => resolution,
         Err(response) => return response,

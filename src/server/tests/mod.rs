@@ -1471,3 +1471,88 @@ async fn test_vm011_openai_streaming_with_tools_single_line_frames() {
         .join("\n");
     assert_data_frames_are_single_line_json(&body_without_done, "openai stream+tools");
 }
+
+/// M-2 regression: a streaming provider whose response_body contains an
+/// invalid Tera template must return HTTP 500 — not HTTP 200 with an empty
+/// body. Previously render failure was silenced with unwrap_or_default() so
+/// callers received a well-formed SSE envelope with zero content chunks.
+#[tokio::test]
+async fn test_streaming_body_render_failure_returns_500() {
+    let mut registry = crate::provider::ProviderRegistry::new();
+    registry
+        .add_provider(crate::provider::ProviderConfig {
+            name: "openai".to_string(),
+            matcher: "^/v1/chat/completions$".to_string(),
+            request_mapping: HashMap::new(),
+            response_template: None,
+            // Intentionally broken Tera syntax — unclosed variable tag.
+            response_body: Some("{{ broken_template".to_string()),
+            stream: Some(crate::provider::ProviderStreamConfig {
+                enabled: true,
+                format: None,
+                encoding: None,
+                frame_format: None,
+                lifecycle: None,
+            }),
+            status_code: None,
+            error_template: None,
+            priority: 100,
+        })
+        .unwrap();
+
+    let store = Arc::new(TenantStoreHandle::new(Arc::new(TenantStore::new(
+        TenancyMode::Single,
+        PathBuf::from("config"),
+        crate::tenancy::TenancyConfig::default(),
+        crate::config::LatencyConfig::default(),
+        crate::config::ChaosConfig::default(),
+        "x-admin-key".to_string(),
+        None,
+        "x-tenant".to_string(),
+        Arc::new(crate::tenancy::TenantRuntime {
+            label: crate::tenancy::DEFAULT_TENANT_ID.to_string(),
+            template_metadata: crate::tenancy::TenantTemplateMetadata {
+                id: crate::tenancy::DEFAULT_TENANT_ID.to_string(),
+                ..crate::tenancy::TenantTemplateMetadata::default()
+            },
+            registry: Arc::new(registry),
+            requires_key: false,
+            management_auth_header: "x-tenant-admin-key".to_string(),
+            management_auth_secret: None,
+            latency: crate::config::LatencyConfig::default(),
+            chaos: crate::config::ChaosConfig::default(),
+        }),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        std::collections::HashSet::new(),
+        std::collections::HashSet::new(),
+    ))));
+
+    let app = create_app(get_test_config(), None, store).await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"stream":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a broken streaming template must return 500, not 200 with empty body"
+    );
+    // Confirm the response is not an SSE stream (real error, not silent empty stream).
+    let body_text = String::from_utf8(drain_body(resp).await).unwrap();
+    assert!(
+        !body_text.starts_with("data:"),
+        "error response must not be an SSE stream; got:\n{}",
+        body_text
+    );
+}
